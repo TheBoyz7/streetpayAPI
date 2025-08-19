@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -9,9 +10,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Streetpay.API.Migrations
 {
     [DbContext(typeof(StreetPayDbContext))]
-    partial class StreetPayDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250716205508_UpdateTransactionModel")]
+    partial class UpdateTransactionModel
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.7");
@@ -22,11 +25,8 @@ namespace Streetpay.API.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
-                    b.Property<decimal>("Amount")
-                        .HasColumnType("DECIMAL(18,2)");
-
-                    b.Property<bool>("IsSynced")
-                        .HasColumnType("INTEGER");
+                    b.Property<double>("Amount")
+                        .HasColumnType("REAL");
 
                     b.Property<string>("ReceiverPhone")
                         .IsRequired()
@@ -55,8 +55,8 @@ namespace Streetpay.API.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
-                    b.Property<decimal>("MainBalance")
-                        .HasColumnType("DECIMAL(18,2)");
+                    b.Property<double>("MainBalance")
+                        .HasColumnType("REAL");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -70,8 +70,8 @@ namespace Streetpay.API.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<decimal>("SavingsBalance")
-                        .HasColumnType("DECIMAL(18,2)");
+                    b.Property<double>("SavingsBalance")
+                        .HasColumnType("REAL");
 
                     b.HasKey("Id");
 

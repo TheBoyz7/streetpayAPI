@@ -2,7 +2,7 @@ namespace Streetpay.API.Models.DTOs
 {
     public class WalletResponse
     {
-        public double Main { get; set; }
-        public double Savings { get; set; }
+        public decimal Main { get; set; }
+        public decimal Savings { get; set; }
     }
 }

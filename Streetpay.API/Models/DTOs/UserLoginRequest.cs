@@ -1,4 +1,8 @@
 namespace Streetpay.API.Models.DTOs
 {
-    public record UserLoginRequest(string Phone, string Pin);
+    public class UserLoginRequest
+    {
+        public string Phone { get; set; } = string.Empty;
+        public string Pin { get; set; } = string.Empty;
+    }
 }
