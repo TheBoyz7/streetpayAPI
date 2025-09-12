@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -9,9 +10,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Streetpay.API.Migrations
 {
     [DbContext(typeof(StreetPayDbContext))]
-    partial class StreetPayDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250908074501_AddTransactionFields")]
+    partial class AddTransactionFields
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.7");
@@ -36,18 +39,12 @@ namespace Streetpay.API.Migrations
                     b.Property<int?>("ReceiverId")
                         .HasColumnType("INTEGER");
 
-                    b.Property<decimal?>("ReceiverNewBalance")
-                        .HasColumnType("DECIMAL(18,2)");
-
                     b.Property<string>("ReceiverPhone")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<int?>("SenderId")
                         .HasColumnType("INTEGER");
-
-                    b.Property<decimal?>("SenderNewBalance")
-                        .HasColumnType("DECIMAL(18,2)");
 
                     b.Property<string>("SenderPhone")
                         .IsRequired()

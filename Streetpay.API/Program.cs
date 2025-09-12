@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Streetpay.API.Models;
 using Streetpay.API.Models.DTOs;
 using System.ComponentModel.DataAnnotations;
+using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -9,7 +10,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddDbContext<StreetPayDbContext>(options =>
-    options.UseSqlite("Data Source=streetpay.db"));
+    options.UseSqlite("Data Source=streetpay.db;Pooling=false"));
 
 var app = builder.Build();
 
@@ -19,7 +20,7 @@ app.UseSwaggerUI();
 
 app.MapGet("/", () => Results.Ok(new { Message = "StreetPay Offline API is live" }));
 
-// Register a new user
+// Register a new user (unchanged)
 app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -40,17 +41,29 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
     };
 
     db.Users.Add(newUser);
-    await db.SaveChangesAsync();
-
-    return Results.Created($"/auth/profile/{newUser.Id}", new
+    try
     {
-        newUser.Id,
-        newUser.Name,
-        newUser.Phone
-    });
+        await db.SaveChangesAsync();
+        return Results.Created($"/auth/profile/{newUser.Id}", new
+        {
+            newUser.Id,
+            newUser.Name,
+            newUser.Phone
+        });
+    }
+    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.WriteLine($"Database locked during user registration: {ex.Message}");
+        return Results.StatusCode(503);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error registering user: {ex.Message}");
+        return Results.StatusCode(500);
+    }
 });
 
-// Login user
+// Login user (unchanged)
 app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -72,7 +85,7 @@ app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db)
     });
 });
 
-// Profile
+// Profile (unchanged)
 app.MapGet("/auth/profile/{id}", async (int id, StreetPayDbContext db) =>
 {
     var user = await db.Users.FindAsync(id);
@@ -87,7 +100,7 @@ app.MapGet("/auth/profile/{id}", async (int id, StreetPayDbContext db) =>
     });
 });
 
-// Wallet
+// Wallet (unchanged)
 app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db) =>
 {
     var user = await db.Users.FindAsync(id);
@@ -103,8 +116,8 @@ app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db) =>
     return Results.Ok(wallet);
 });
 
-// Update wallet balance
-app.MapPut("/wallet/{id}", async (int id, WalletResponse wallet, StreetPayDbContext db) =>
+// Update wallet balance (unchanged)
+app.MapPut("/wallet/{id}", async (int id, WalletUpdateRequest wallet, StreetPayDbContext db) =>
 {
     var user = await db.Users.FindAsync(id);
     if (user == null)
@@ -118,12 +131,24 @@ app.MapPut("/wallet/{id}", async (int id, WalletResponse wallet, StreetPayDbCont
 
     user.MainBalance = wallet.Main;
     user.SavingsBalance = wallet.Savings;
-    await db.SaveChangesAsync();
-
-    return Results.Ok(new { Message = "Wallet updated", Main = user.MainBalance, Savings = user.SavingsBalance });
+    try
+    {
+        await db.SaveChangesAsync();
+        return Results.Ok(new { Message = "Wallet updated", Main = user.MainBalance, Savings = user.SavingsBalance });
+    }
+    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.WriteLine($"Database locked during wallet update: {ex.Message}");
+        return Results.StatusCode(503);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error updating wallet: {ex.Message}");
+        return Results.StatusCode(500);
+    }
 });
 
-// Create new transaction
+// Create new transaction (unchanged)
 app.MapPost("/transactions", async (Transaction txn, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -136,19 +161,31 @@ app.MapPost("/transactions", async (Transaction txn, StreetPayDbContext db) =>
         return Results.Conflict(new { Message = "Transaction already exists" });
 
     db.Transactions.Add(txn);
-    await db.SaveChangesAsync();
-
-    return Results.Created($"/transactions/{txn.Id}", txn);
+    try
+    {
+        await db.SaveChangesAsync();
+        return Results.Created($"/transactions/{txn.Id}", txn);
+    }
+    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.WriteLine($"Database locked during transaction creation: {ex.Message}");
+        return Results.StatusCode(503);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error creating transaction: {ex.Message}");
+        return Results.StatusCode(500);
+    }
 });
 
-// Get all transactions
+// Get all transactions (unchanged)
 app.MapGet("/transactions", async (StreetPayDbContext db) =>
 {
     var all = await db.Transactions.ToListAsync();
     return Results.Ok(all);
 });
 
-// Pending transactions
+// Pending transactions (unchanged)
 app.MapGet("/transactions/pending", async (StreetPayDbContext db) =>
 {
     var pending = await db.Transactions
@@ -158,7 +195,7 @@ app.MapGet("/transactions/pending", async (StreetPayDbContext db) =>
     return Results.Ok(pending);
 });
 
-// Get user by phone number
+// Get user by phone number (unchanged)
 app.MapGet("/users/by-phone/{phone}", async (string phone, StreetPayDbContext db) =>
 {
     if (string.IsNullOrWhiteSpace(phone))
@@ -201,24 +238,46 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
     var txn = new Transaction
     {
         TransactionId = dto.TransactionId,
+        SenderId = sender.Id,
+        ReceiverId = receiver.Id,
         SenderPhone = sender.Phone,
         ReceiverPhone = receiver.Phone,
         Amount = dto.Amount,
+        SenderNewBalance = sender.MainBalance, // Store new sender balance
+        ReceiverNewBalance = receiver.MainBalance, // Store new receiver balance
+        Currency = "NGN",
         Status = "sent",
         IsSynced = true,
-        Timestamp = DateTime.UtcNow
+        Timestamp = DateTime.UtcNow,
+        Type = "online",
+        Used = true,
+        Signature = string.Empty
     };
 
     db.Transactions.Add(txn);
-    await db.SaveChangesAsync();
-
-    return Results.Ok(new
+    try
     {
-        message = "Transaction successful",
-        transactionId = txn.TransactionId,
-        amount = txn.Amount,
-        to = receiver.Name
-    });
+        await db.SaveChangesAsync();
+        return Results.Ok(new
+        {
+            message = "Transaction successful",
+            transactionId = txn.TransactionId,
+            amount = txn.Amount,
+            to = receiver.Name,
+            senderNewBalance = txn.SenderNewBalance, // Return new balance
+            receiverNewBalance = txn.ReceiverNewBalance // Return new balance
+        });
+    }
+    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.WriteLine($"Database locked during online transaction: {ex.Message}");
+        return Results.StatusCode(503);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error during online transaction: {ex.Message}");
+        return Results.StatusCode(500);
+    }
 });
 
 // Send transaction via offline
@@ -245,65 +304,168 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
     var txn = new Transaction
     {
         TransactionId = dto.TransactionId,
+        SenderId = sender.Id,
+        ReceiverId = receiver.Id,
         SenderPhone = dto.SenderPhone,
         ReceiverPhone = dto.ReceiverPhone,
         Amount = dto.Amount,
+        SenderNewBalance = sender.MainBalance, // Store sender's current balance (before deduction)
+        ReceiverNewBalance = receiver.MainBalance + dto.Amount, // Store receiver's new balance
+        Currency = "NGN",
         Status = "pending",
         IsSynced = false,
-        Timestamp = dto.Timestamp
+        Timestamp = dto.Timestamp,
+        Type = "offline",
+        Used = true,
+        Signature = string.Empty // TODO: Implement signature verification
     };
 
     db.Transactions.Add(txn);
-    await db.SaveChangesAsync();
-
-    return Results.Created($"/transactions/{txn.Id}", txn);
+    try
+    {
+        await db.SaveChangesAsync();
+        return Results.Created($"/transactions/{txn.Id}", new
+        {
+            txn.Id,
+            txn.TransactionId,
+            txn.SenderPhone,
+            txn.ReceiverPhone,
+            txn.Amount,
+            txn.SenderNewBalance,
+            txn.ReceiverNewBalance,
+            txn.Currency,
+            txn.Status,
+            txn.IsSynced,
+            txn.Timestamp,
+            txn.Type,
+            txn.Used,
+            txn.Signature
+        });
+    }
+    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.WriteLine($"Database locked during offline transaction: {ex.Message}");
+        return Results.StatusCode(503);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error during offline transaction: {ex.Message}");
+        return Results.StatusCode(500);
+    }
 });
 
 // Sync pending transactions
 app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
+    var results = new List<object>();
+
     foreach (var dto in txns)
     {
         if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
         {
-            return Results.BadRequest(new { Message = "Invalid transaction data", Errors = validationResults.Select(v => v.ErrorMessage) });
+            Console.WriteLine($"Validation failed for transaction {dto.TransactionId}: {string.Join(", ", validationResults.Select(v => v.ErrorMessage))}");
+            results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid transaction data" });
+            continue;
         }
-    }
 
-    foreach (var dto in txns)
-    {
         var sender = await db.Users.FirstOrDefaultAsync(u => u.Phone == dto.SenderPhone);
         var receiver = await db.Users.FirstOrDefaultAsync(u => u.Phone == dto.ReceiverPhone);
 
         if (sender == null || receiver == null)
+        {
+            results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Sender or receiver not found" });
             continue;
+        }
 
-        if (dto.Amount <= 0 || sender.MainBalance < dto.Amount)
+        if (dto.Amount <= 0)
+        {
+            results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid amount" });
             continue;
+        }
 
-        if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId))
+        if (sender.MainBalance < dto.Amount)
+        {
+            results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Insufficient sender balance" });
             continue;
+        }
 
+        var existingTxn = await db.Transactions.FirstOrDefaultAsync(t => t.TransactionId == dto.TransactionId);
+        if (existingTxn != null)
+        {
+            if (existingTxn.IsSynced)
+            {
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Skipped", Message = "Transaction already synced" });
+                continue;
+            }
+            existingTxn.Status = "synced";
+            existingTxn.IsSynced = true;
+            existingTxn.SenderId = sender.Id;
+            existingTxn.ReceiverId = receiver.Id;
+            existingTxn.Type = "offline";
+            existingTxn.Used = true;
+            existingTxn.Currency = "NGN";
+            existingTxn.Signature = existingTxn.Signature ?? string.Empty;
+            existingTxn.SenderNewBalance = sender.MainBalance - dto.Amount; // Update sender's new balance
+            existingTxn.ReceiverNewBalance = receiver.MainBalance + dto.Amount; // Update receiver's new balance
+        }
+        else
+        {
+            var txn = new Transaction
+            {
+                TransactionId = dto.TransactionId,
+                SenderId = sender.Id,
+                ReceiverId = receiver.Id,
+                SenderPhone = dto.SenderPhone,
+                ReceiverPhone = dto.ReceiverPhone,
+                Amount = dto.Amount,
+                SenderNewBalance = sender.MainBalance - dto.Amount, // Store new sender balance
+                ReceiverNewBalance = receiver.MainBalance + dto.Amount, // Store new receiver balance
+                Currency = "NGN",
+                Status = "synced",
+                IsSynced = true,
+                Timestamp = dto.Timestamp,
+                Type = "offline",
+                Used = true,
+                Signature = string.Empty // TODO: Implement signature verification
+            };
+            db.Transactions.Add(txn);
+        }
+
+        // Update balances
         sender.MainBalance -= dto.Amount;
         receiver.MainBalance += dto.Amount;
 
-        var txn = new Transaction
-        {
-            TransactionId = dto.TransactionId,
-            SenderPhone = dto.SenderPhone,
-            ReceiverPhone = dto.ReceiverPhone,
-            Amount = dto.Amount,
-            Status = "synced",
-            IsSynced = true,
-            Timestamp = dto.Timestamp
-        };
-
-        db.Transactions.Add(txn);
+        results.Add(new { TransactionId = dto.TransactionId, Status = "Success", Message = "Transaction synced", SenderNewBalance = sender.MainBalance, ReceiverNewBalance = receiver.MainBalance });
     }
 
-    await db.SaveChangesAsync();
-    return Results.Ok(new { Message = "Sync complete" });
+    // Save all changes with retry
+    int retries = 3;
+    while (retries > 0)
+    {
+        try
+        {
+            await db.SaveChangesAsync();
+            return Results.Ok(new { Message = "Sync complete", Results = results });
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
+        {
+            Console.WriteLine($"Database locked during sync: {ex.Message}");
+            retries--;
+            if (retries == 0)
+            {
+                return Results.StatusCode(503);
+            }
+            await Task.Delay(100);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during sync: {ex.Message}");
+            return Results.StatusCode(500);
+        }
+    }
+
+    return Results.StatusCode(503);
 });
 
 // Transaction history
@@ -333,10 +495,13 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
             receiverPhone = txn.ReceiverPhone,
             receiverName = receiver?.Name ?? txn.ReceiverPhone,
             amount = txn.Amount,
-            currency = "NGN",
+            senderNewBalance = txn.SenderNewBalance, // Include new balance
+            receiverNewBalance = txn.ReceiverNewBalance, // Include new balance
+            currency = txn.Currency,
             timestamp = txn.Timestamp.ToString("o"),
             status = txn.Status,
-            used = txn.IsSynced
+            used = txn.IsSynced,
+            type = txn.Type
         });
     }
 
