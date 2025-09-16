@@ -208,7 +208,7 @@ app.MapGet("/users/by-phone/{phone}", async (string phone, StreetPayDbContext db
     return Results.Ok(new { id = user.Id, name = user.Name });
 });
 
-// Send money online
+// Send money online (updated with transaction scope)
 app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -232,55 +232,54 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
     if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId))
         return Results.Conflict(new { Message = "Transaction already exists" });
 
-    sender.MainBalance -= dto.Amount;
-    receiver.MainBalance += dto.Amount;
-
-    var txn = new Transaction
-    {
-        TransactionId = dto.TransactionId,
-        SenderId = sender.Id,
-        ReceiverId = receiver.Id,
-        SenderPhone = sender.Phone,
-        ReceiverPhone = receiver.Phone,
-        Amount = dto.Amount,
-        SenderNewBalance = sender.MainBalance, // Store new sender balance
-        ReceiverNewBalance = receiver.MainBalance, // Store new receiver balance
-        Currency = "NGN",
-        Status = "sent",
-        IsSynced = true,
-        Timestamp = DateTime.UtcNow,
-        Type = "online",
-        Used = true,
-        Signature = string.Empty
-    };
-
-    db.Transactions.Add(txn);
+    using var transaction = await db.Database.BeginTransactionAsync();
     try
     {
+        sender.MainBalance -= dto.Amount;
+        receiver.MainBalance += dto.Amount;
+
+        var txn = new Transaction
+        {
+            TransactionId = dto.TransactionId,
+            SenderId = sender.Id,
+            ReceiverId = receiver.Id,
+            SenderPhone = sender.Phone,
+            ReceiverPhone = receiver.Phone,
+            Amount = dto.Amount,
+            SenderNewBalance = sender.MainBalance,
+            ReceiverNewBalance = receiver.MainBalance,
+            Currency = "NGN",
+            Status = "sent",
+            IsSynced = true,
+            Timestamp = DateTime.UtcNow,
+            Type = "online",
+            Used = true,
+            Signature = string.Empty
+        };
+
+        db.Transactions.Add(txn);
         await db.SaveChangesAsync();
+        await transaction.CommitAsync();
+
         return Results.Ok(new
         {
             message = "Transaction successful",
             transactionId = txn.TransactionId,
             amount = txn.Amount,
             to = receiver.Name,
-            senderNewBalance = txn.SenderNewBalance, // Return new balance
-            receiverNewBalance = txn.ReceiverNewBalance // Return new balance
+            senderNewBalance = txn.SenderNewBalance,
+            receiverNewBalance = txn.ReceiverNewBalance
         });
-    }
-    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
-    {
-        Console.WriteLine($"Database locked during online transaction: {ex.Message}");
-        return Results.StatusCode(503);
     }
     catch (Exception ex)
     {
+        await transaction.RollbackAsync();
         Console.WriteLine($"Error during online transaction: {ex.Message}");
         return Results.StatusCode(500);
     }
 });
 
-// Send transaction via offline
+// Receive offline (updated to pend and validate during sync)
 app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -298,9 +297,6 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
     if (dto.Amount <= 0)
         return Results.BadRequest(new { Message = "Invalid amount" });
 
-    if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId))
-        return Results.Conflict(new { Message = "Transaction already exists" });
-
     var txn = new Transaction
     {
         TransactionId = dto.TransactionId,
@@ -309,15 +305,15 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
         SenderPhone = dto.SenderPhone,
         ReceiverPhone = dto.ReceiverPhone,
         Amount = dto.Amount,
-        SenderNewBalance = sender.MainBalance, // Store sender's current balance (before deduction)
-        ReceiverNewBalance = receiver.MainBalance + dto.Amount, // Store receiver's new balance
+        SenderNewBalance = sender.MainBalance, // Current balance, to be updated on sync
+        ReceiverNewBalance = receiver.MainBalance + dto.Amount,
         Currency = "NGN",
         Status = "pending",
         IsSynced = false,
         Timestamp = dto.Timestamp,
         Type = "offline",
         Used = true,
-        Signature = string.Empty // TODO: Implement signature verification
+        Signature = string.Empty
     };
 
     db.Transactions.Add(txn);
@@ -342,11 +338,6 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
             txn.Signature
         });
     }
-    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
-    {
-        Console.WriteLine($"Database locked during offline transaction: {ex.Message}");
-        return Results.StatusCode(503);
-    }
     catch (Exception ex)
     {
         Console.WriteLine($"Error during offline transaction: {ex.Message}");
@@ -354,118 +345,100 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
     }
 });
 
-// Sync pending transactions
+// Sync pending transactions (updated with transaction scope and validation)
 app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
     var results = new List<object>();
 
-    foreach (var dto in txns)
+    using var transaction = await db.Database.BeginTransactionAsync();
+    try
     {
-        if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
+        foreach (var dto in txns)
         {
-            Console.WriteLine($"Validation failed for transaction {dto.TransactionId}: {string.Join(", ", validationResults.Select(v => v.ErrorMessage))}");
-            results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid transaction data" });
-            continue;
-        }
-
-        var sender = await db.Users.FirstOrDefaultAsync(u => u.Phone == dto.SenderPhone);
-        var receiver = await db.Users.FirstOrDefaultAsync(u => u.Phone == dto.ReceiverPhone);
-
-        if (sender == null || receiver == null)
-        {
-            results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Sender or receiver not found" });
-            continue;
-        }
-
-        if (dto.Amount <= 0)
-        {
-            results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid amount" });
-            continue;
-        }
-
-        if (sender.MainBalance < dto.Amount)
-        {
-            results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Insufficient sender balance" });
-            continue;
-        }
-
-        var existingTxn = await db.Transactions.FirstOrDefaultAsync(t => t.TransactionId == dto.TransactionId);
-        if (existingTxn != null)
-        {
-            if (existingTxn.IsSynced)
+            if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
             {
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Skipped", Message = "Transaction already synced" });
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid transaction data" });
                 continue;
             }
-            existingTxn.Status = "synced";
-            existingTxn.IsSynced = true;
-            existingTxn.SenderId = sender.Id;
-            existingTxn.ReceiverId = receiver.Id;
-            existingTxn.Type = "offline";
-            existingTxn.Used = true;
-            existingTxn.Currency = "NGN";
-            existingTxn.Signature = existingTxn.Signature ?? string.Empty;
-            existingTxn.SenderNewBalance = sender.MainBalance - dto.Amount; // Update sender's new balance
-            existingTxn.ReceiverNewBalance = receiver.MainBalance + dto.Amount; // Update receiver's new balance
-        }
-        else
-        {
-            var txn = new Transaction
+
+            var sender = await db.Users.FirstOrDefaultAsync(u => u.Phone == dto.SenderPhone);
+            var receiver = await db.Users.FirstOrDefaultAsync(u => u.Phone == dto.ReceiverPhone);
+
+            if (sender == null || receiver == null)
             {
-                TransactionId = dto.TransactionId,
-                SenderId = sender.Id,
-                ReceiverId = receiver.Id,
-                SenderPhone = dto.SenderPhone,
-                ReceiverPhone = dto.ReceiverPhone,
-                Amount = dto.Amount,
-                SenderNewBalance = sender.MainBalance - dto.Amount, // Store new sender balance
-                ReceiverNewBalance = receiver.MainBalance + dto.Amount, // Store new receiver balance
-                Currency = "NGN",
-                Status = "synced",
-                IsSynced = true,
-                Timestamp = dto.Timestamp,
-                Type = "offline",
-                Used = true,
-                Signature = string.Empty // TODO: Implement signature verification
-            };
-            db.Transactions.Add(txn);
-        }
-
-        // Update balances
-        sender.MainBalance -= dto.Amount;
-        receiver.MainBalance += dto.Amount;
-
-        results.Add(new { TransactionId = dto.TransactionId, Status = "Success", Message = "Transaction synced", SenderNewBalance = sender.MainBalance, ReceiverNewBalance = receiver.MainBalance });
-    }
-
-    // Save all changes with retry
-    int retries = 3;
-    while (retries > 0)
-    {
-        try
-        {
-            await db.SaveChangesAsync();
-            return Results.Ok(new { Message = "Sync complete", Results = results });
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
-        {
-            Console.WriteLine($"Database locked during sync: {ex.Message}");
-            retries--;
-            if (retries == 0)
-            {
-                return Results.StatusCode(503);
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Sender or receiver not found" });
+                continue;
             }
-            await Task.Delay(100);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error during sync: {ex.Message}");
-            return Results.StatusCode(500);
-        }
-    }
 
-    return Results.StatusCode(503);
+            if (dto.Amount <= 0)
+            {
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid amount" });
+                continue;
+            }
+
+            if (sender.MainBalance < dto.Amount)
+            {
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Insufficient sender balance" });
+                continue;
+            }
+
+            var existingTxn = await db.Transactions.FirstOrDefaultAsync(t => t.TransactionId == dto.TransactionId);
+            if (existingTxn != null)
+            {
+                if (existingTxn.IsSynced)
+                {
+                    results.Add(new { TransactionId = dto.TransactionId, Status = "Skipped", Message = "Transaction already synced" });
+                    continue;
+                }
+                existingTxn.Status = "synced";
+                existingTxn.IsSynced = true;
+                existingTxn.SenderId = sender.Id;
+                existingTxn.ReceiverId = receiver.Id;
+                existingTxn.Type = "offline";
+                existingTxn.Used = true;
+                existingTxn.SenderNewBalance = sender.MainBalance - dto.Amount;
+                existingTxn.ReceiverNewBalance = receiver.MainBalance + dto.Amount;
+            }
+            else
+            {
+                var txn = new Transaction
+                {
+                    TransactionId = dto.TransactionId,
+                    SenderId = sender.Id,
+                    ReceiverId = receiver.Id,
+                    SenderPhone = dto.SenderPhone,
+                    ReceiverPhone = dto.ReceiverPhone,
+                    Amount = dto.Amount,
+                    SenderNewBalance = sender.MainBalance - dto.Amount,
+                    ReceiverNewBalance = receiver.MainBalance + dto.Amount,
+                    Currency = "NGN",
+                    Status = "synced",
+                    IsSynced = true,
+                    Timestamp = dto.Timestamp,
+                    Type = "offline",
+                    Used = true,
+                    Signature = string.Empty
+                };
+                db.Transactions.Add(txn);
+            }
+
+            sender.MainBalance -= dto.Amount;
+            receiver.MainBalance += dto.Amount;
+
+            results.Add(new { TransactionId = dto.TransactionId, Status = "Success", Message = "Transaction synced", SenderNewBalance = sender.MainBalance, ReceiverNewBalance = receiver.MainBalance });
+        }
+
+        await db.SaveChangesAsync();
+        await transaction.CommitAsync();
+        return Results.Ok(new { Message = "Sync complete", Results = results });
+    }
+    catch (Exception ex)
+    {
+        await transaction.RollbackAsync();
+        Console.WriteLine($"Error during sync: {ex.Message}");
+        return Results.StatusCode(500);
+    }
 });
 
 // Transaction history

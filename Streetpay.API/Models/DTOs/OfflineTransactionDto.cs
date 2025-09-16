@@ -41,5 +41,15 @@ namespace Streetpay.API.Models.DTOs
         [Required]
         [MaxLength(64)]
         public string TransactionId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Proposed sender's new balance (optional for validation).
+        /// </summary>
+        public decimal? SenderNewBalance { get; set; }
+
+        /// <summary>
+        /// Proposed receiver's new balance (optional for validation).
+        /// </summary>
+        public decimal? ReceiverNewBalance { get; set; }
     }
 }
