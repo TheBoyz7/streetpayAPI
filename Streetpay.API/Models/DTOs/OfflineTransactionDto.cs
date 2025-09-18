@@ -23,7 +23,7 @@ namespace Streetpay.API.Models.DTOs
         public string ReceiverPhone { get; set; } = string.Empty;
 
         /// <summary>
-        /// Transaction amount (in NGN).
+        /// Transaction amount
         /// </summary>
         [Required]
         [Range(0.01, 79228162514264337593543950335.0)]

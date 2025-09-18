@@ -55,8 +55,8 @@ namespace Streetpay.API.Models
         [MaxLength(256)]
         public string Signature { get; set; } = string.Empty;
 
-        // Navigation properties
-        public virtual User Sender { get; set; } // Reference to the sender user
-        public virtual User Receiver { get; set; } // Reference to the receiver user
+        public virtual User Sender { get; set; } 
+
+        public virtual User Receiver { get; set; } 
     }
 }

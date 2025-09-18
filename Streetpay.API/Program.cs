@@ -20,7 +20,7 @@ app.UseSwaggerUI();
 
 app.MapGet("/", () => Results.Ok(new { Message = "StreetPay Offline API is live" }));
 
-// Register a new user (unchanged)
+// Register a new user 
 app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -63,7 +63,7 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
     }
 });
 
-// Login user (unchanged)
+// Login user 
 app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -85,7 +85,7 @@ app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db)
     });
 });
 
-// Profile (unchanged)
+// Profile 
 app.MapGet("/auth/profile/{id}", async (int id, StreetPayDbContext db) =>
 {
     var user = await db.Users.FindAsync(id);
@@ -100,7 +100,7 @@ app.MapGet("/auth/profile/{id}", async (int id, StreetPayDbContext db) =>
     });
 });
 
-// Wallet (unchanged)
+// Wallet
 app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db) =>
 {
     var user = await db.Users.FindAsync(id);
@@ -116,7 +116,7 @@ app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db) =>
     return Results.Ok(wallet);
 });
 
-// Update wallet balance (unchanged)
+// Update wallet balance 
 app.MapPut("/wallet/{id}", async (int id, WalletUpdateRequest wallet, StreetPayDbContext db) =>
 {
     var user = await db.Users.FindAsync(id);
@@ -148,7 +148,7 @@ app.MapPut("/wallet/{id}", async (int id, WalletUpdateRequest wallet, StreetPayD
     }
 });
 
-// Create new transaction (unchanged)
+// Create new transaction 
 app.MapPost("/transactions", async (Transaction txn, StreetPayDbContext db) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -178,14 +178,14 @@ app.MapPost("/transactions", async (Transaction txn, StreetPayDbContext db) =>
     }
 });
 
-// Get all transactions (unchanged)
+// Get all transactions 
 app.MapGet("/transactions", async (StreetPayDbContext db) =>
 {
     var all = await db.Transactions.ToListAsync();
     return Results.Ok(all);
 });
 
-// Pending transactions (unchanged)
+// Pending transactions 
 app.MapGet("/transactions/pending", async (StreetPayDbContext db) =>
 {
     var pending = await db.Transactions
@@ -195,7 +195,7 @@ app.MapGet("/transactions/pending", async (StreetPayDbContext db) =>
     return Results.Ok(pending);
 });
 
-// Get user by phone number (unchanged)
+// Get user by phone number 
 app.MapGet("/users/by-phone/{phone}", async (string phone, StreetPayDbContext db) =>
 {
     if (string.IsNullOrWhiteSpace(phone))
@@ -305,7 +305,7 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
         SenderPhone = dto.SenderPhone,
         ReceiverPhone = dto.ReceiverPhone,
         Amount = dto.Amount,
-        SenderNewBalance = sender.MainBalance, // Current balance, to be updated on sync
+        SenderNewBalance = sender.MainBalance, 
         ReceiverNewBalance = receiver.MainBalance + dto.Amount,
         Currency = "NGN",
         Status = "pending",
@@ -468,8 +468,8 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
             receiverPhone = txn.ReceiverPhone,
             receiverName = receiver?.Name ?? txn.ReceiverPhone,
             amount = txn.Amount,
-            senderNewBalance = txn.SenderNewBalance, // Include new balance
-            receiverNewBalance = txn.ReceiverNewBalance, // Include new balance
+            senderNewBalance = txn.SenderNewBalance, 
+            receiverNewBalance = txn.ReceiverNewBalance, 
             currency = txn.Currency,
             timestamp = txn.Timestamp.ToString("o"),
             status = txn.Status,
