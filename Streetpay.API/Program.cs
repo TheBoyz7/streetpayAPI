@@ -1,8 +1,12 @@
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Streetpay.API.Helpers;
+using Streetpay.API.Interfaces;
 using Streetpay.API.Models;
 using Streetpay.API.Models.DTOs;
+using Streetpay.API.Services;
+using Streetpay.API.Services.Cryptography;
 using System.ComponentModel.DataAnnotations;
-using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -11,6 +15,11 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddDbContext<StreetPayDbContext>(options =>
     options.UseSqlite("Data Source=streetpay.db;Pooling=false"));
+//omo incase sha
+builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection("Encryption"));
+builder.Services.AddScoped<IAesCryptographyService, AesCryptographyService>();
+builder.Services.AddScoped<IRsaCryptographyService, RsaCryptographyService>();
+builder.Services.AddScoped<Encryption>();
 
 var app = builder.Build();
 
@@ -62,6 +71,8 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
         return Results.StatusCode(500);
     }
 });
+
+
 
 // Login user 
 app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db) =>

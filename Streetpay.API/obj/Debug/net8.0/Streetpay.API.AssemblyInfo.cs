@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Streetpay.API")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+7f0644d3ea2af8e456d7b5c8febe11ba09894b7d")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+767207b4aec004ddbf8755c3a2973c326043eda3")]
 [assembly: System.Reflection.AssemblyProductAttribute("Streetpay.API")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Streetpay.API")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
