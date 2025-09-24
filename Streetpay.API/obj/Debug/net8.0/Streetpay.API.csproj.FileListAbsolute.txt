@@ -317,3 +317,9 @@ C:\Users\MJ\Documents\GitHub\streetpayAPI\Streetpay.API\obj\Debug\net8.0\refint\
 C:\Users\MJ\Documents\GitHub\streetpayAPI\Streetpay.API\obj\Debug\net8.0\Streetpay.API.pdb
 C:\Users\MJ\Documents\GitHub\streetpayAPI\Streetpay.API\obj\Debug\net8.0\Streetpay.API.genruntimeconfig.cache
 C:\Users\MJ\Documents\GitHub\streetpayAPI\Streetpay.API\obj\Debug\net8.0\ref\Streetpay.API.dll
+C:\Users\user222\Documents\GitHub\streetpayAPI\Streetpay.API\bin\Debug\net8.0\BCrypt.Net-Next.dll
+C:\Users\user222\Documents\GitHub\streetpayAPI\Streetpay.API\bin\Debug\net8.0\Microsoft.IdentityModel.Abstractions.dll
+C:\Users\user222\Documents\GitHub\streetpayAPI\Streetpay.API\bin\Debug\net8.0\Microsoft.IdentityModel.JsonWebTokens.dll
+C:\Users\user222\Documents\GitHub\streetpayAPI\Streetpay.API\bin\Debug\net8.0\Microsoft.IdentityModel.Logging.dll
+C:\Users\user222\Documents\GitHub\streetpayAPI\Streetpay.API\bin\Debug\net8.0\Microsoft.IdentityModel.Tokens.dll
+C:\Users\user222\Documents\GitHub\streetpayAPI\Streetpay.API\bin\Debug\net8.0\System.IdentityModel.Tokens.Jwt.dll

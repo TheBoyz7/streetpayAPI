@@ -7,6 +7,11 @@ using Streetpay.API.Models.DTOs;
 using Streetpay.API.Services;
 using Streetpay.API.Services.Cryptography;
 using System.ComponentModel.DataAnnotations;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+using BCrypt.Net;
 using System.Numerics;
 using System.Xml.Linq;
 
@@ -17,11 +22,12 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddDbContext<StreetPayDbContext>(options =>
     options.UseSqlite("Data Source=streetpay.db;Pooling=false"));
-//omo incase sha
 builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection("Encryption"));
+builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
 builder.Services.AddScoped<IAesCryptographyService, AesCryptographyService>();
 builder.Services.AddScoped<IRsaCryptographyService, RsaCryptographyService>();
 builder.Services.AddScoped<Encryption>();
+builder.Services.AddScoped<KeyManagementService>();
 
 var app = builder.Build();
 
@@ -32,7 +38,7 @@ app.UseSwaggerUI();
 app.MapGet("/", () => Results.Ok(new { Message = "StreetPay Offline API is live" }));
 
 // Register a new user 
-app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext db, Encryption encryption) =>
+app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
     var validationResults = new List<ValidationResult>();
     if (!Validator.TryValidateObject(req, new ValidationContext(req), validationResults, true))
@@ -48,7 +54,7 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
     {
         Name = req.Name,
         Phone = req.Phone,
-        Pin = req.Pin // TODO: Hash PIN in production
+        Pin = BCrypt.Net.BCrypt.HashPassword(req.Pin),
     };
 
     db.Users.Add(newUser);
@@ -77,10 +83,8 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
     }
 });
 
-
-
 // Login user 
-app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db, Encryption encryption) =>
+app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
     var validationResults = new List<ValidationResult>();
     if (!Validator.TryValidateObject(login, new ValidationContext(login), validationResults, true))
@@ -88,21 +92,28 @@ app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db,
         return Results.BadRequest(new { Message = "Invalid input", Errors = validationResults.Select(v => v.ErrorMessage) });
     }
 
-    var user = await db.Users.FirstOrDefaultAsync(u => u.Phone == login.Phone && u.Pin == login.Pin);
-    if (user == null)
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Phone == login.Phone);
+    if (user == null || !BCrypt.Net.BCrypt.Verify(login.Pin, user.Pin))
         return Results.Unauthorized();
+
+    var key = Encoding.ASCII.GetBytes(keyService.GetJwtSecret());
+    var tokenDescriptor = new SecurityTokenDescriptor
+    {
+        Subject = new ClaimsIdentity(new[] { new Claim("id", user.Id.ToString()) }),
+        Expires = DateTime.UtcNow.AddHours(1),
+        SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+    };
+    var tokenHandler = new JwtSecurityTokenHandler();
+    var token = tokenHandler.CreateToken(tokenDescriptor);
 
     var payload = new
     {
-
         id = user.Id,
         name = user.Name,
         phone = user.Phone,
-        token = "mock-jwt-token-123" // TODO: Implement proper JWT in production
-
+        token = tokenHandler.WriteToken(token)
     };
-    return Results.Ok(encryption.EncryptResponse(payload)
-   );
+    return Results.Ok(encryption.EncryptResponse(payload));
 });
 
 // Profile 
@@ -119,7 +130,6 @@ app.MapGet("/auth/profile/{id}", async (int id, StreetPayDbContext db, Encryptio
         user.Phone
     };
     var encrypted = encryption.EncryptResponse(payload);
-
     return Results.Ok(encrypted);
 });
 
@@ -136,7 +146,6 @@ app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db, Encryption encr
         Savings = user.SavingsBalance
     };
     var encrypted = encryption.EncryptResponse(wallet);
-
     return Results.Ok(encrypted);
 });
 
@@ -189,7 +198,6 @@ app.MapPost("/transactions", async (Transaction txn, StreetPayDbContext db, Encr
     {
         await db.SaveChangesAsync();
         var encrypted = encryption.EncryptResponse(txn);
-
         return Results.Created($"/transactions/{txn.Id}", encrypted);
     }
     catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
@@ -218,13 +226,12 @@ app.MapGet("/transactions/pending", async (StreetPayDbContext db, Encryption enc
     var pending = await db.Transactions
         .Where(t => !t.IsSynced)
         .ToListAsync();
-    var encrypted = encryption.EncryptResponse (pending);
-
+    var encrypted = encryption.EncryptResponse(pending);
     return Results.Ok(encrypted);
 });
 
 // Get user by phone number 
-app.MapGet("/users/by-phone/{phone}", async (string phone, StreetPayDbContext db, Encryption encryption) =>
+app.MapGet("/users/by-phone/{phone}", async (string phone, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
     if (string.IsNullOrWhiteSpace(phone))
         return Results.BadRequest(new { Message = "Phone number is required" });
@@ -232,13 +239,14 @@ app.MapGet("/users/by-phone/{phone}", async (string phone, StreetPayDbContext db
     var user = await db.Users.FirstOrDefaultAsync(u => u.Phone == phone);
     if (user == null)
         return Results.NotFound(new { Message = "User not found" });
-    var payload = new { id = user.Id, name = user.Name };
-    var encrypted = encryption.EncryptResponse(payload);
 
-    return Results.Ok(encrypted );
+    var publicKey = keyService.GetPublicKeyForUser(user.Id);
+    var payload = new { id = user.Id, name = user.Name, publicKey };
+    var encrypted = encryption.EncryptResponse(payload);
+    return Results.Ok(encrypted);
 });
 
-// Send money online (updated with transaction scope)
+// Send money online
 app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -299,8 +307,6 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
             senderNewBalance = txn.SenderNewBalance,
             receiverNewBalance = txn.ReceiverNewBalance
         };
-
-
         var encrypted = encryption.EncryptResponse(payload);
         return Results.Ok(encrypted);
     }
@@ -312,8 +318,8 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
     }
 });
 
-// Receive offline (updated to pend and validate during sync)
-app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
+// Receive offline
+app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
     var validationResults = new List<ValidationResult>();
     if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
@@ -371,7 +377,7 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
             txn.Signature
         };
         var encrypted = encryption.EncryptResponse(payload);
-        return Results.Created($"/transactions/{txn.Id}",encrypted );
+        return Results.Created($"/transactions/{txn.Id}", encrypted);
     }
     catch (Exception ex)
     {
@@ -380,8 +386,8 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
     }
 });
 
-// Sync pending transactions (updated with transaction scope and validation)
-app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption) =>
+// Sync pending transactions
+app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
     var validationResults = new List<ValidationResult>();
     var results = new List<object>();
@@ -514,7 +520,6 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
         });
     }
     var encrypted = encryption.EncryptResponse(response);
-
     return Results.Ok(encrypted);
 });
 
