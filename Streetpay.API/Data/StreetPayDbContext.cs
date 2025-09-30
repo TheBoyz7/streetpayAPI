@@ -1,25 +1,48 @@
 using Microsoft.EntityFrameworkCore;
 using Streetpay.API.Models;
 
-public class StreetPayDbContext : DbContext
+namespace Streetpay.API
 {
-    public StreetPayDbContext(DbContextOptions<StreetPayDbContext> options) : base(options) { }
-
-    public DbSet<User> Users { get; set; }
-    public DbSet<Transaction> Transactions { get; set; }
-
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    public class StreetPayDbContext : DbContext
     {
-        modelBuilder.Entity<Transaction>()
-            .HasOne(t => t.Sender)
-            .WithMany()
-            .HasForeignKey(t => t.SenderId)
-            .OnDelete(DeleteBehavior.Restrict);
+        public StreetPayDbContext(DbContextOptions<StreetPayDbContext> options) : base(options) { }
 
-        modelBuilder.Entity<Transaction>()
-            .HasOne(t => t.Receiver)
-            .WithMany()
-            .HasForeignKey(t => t.ReceiverId)
-            .OnDelete(DeleteBehavior.Restrict);
+        public DbSet<User> Users { get; set; }
+        public DbSet<Transaction> Transactions { get; set; }
+        public DbSet<TransactionKey> TransactionKeys { get; set; }
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<Transaction>()
+                .HasOne(t => t.Sender)
+                .WithMany()
+                .HasForeignKey(t => t.SenderId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<Transaction>()
+                .HasOne(t => t.Receiver)
+                .WithMany()
+                .HasForeignKey(t => t.ReceiverId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<TransactionKey>()
+                .HasKey(tk => tk.Id);
+
+            modelBuilder.Entity<TransactionKey>()
+                .HasOne(tk => tk.User)
+                .WithMany()
+                .HasForeignKey(tk => tk.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        }
+    }
+
+    public class TransactionKey
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public string Key { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime ExpiresAt { get; set; }
+        public User User { get; set; }
     }
 }

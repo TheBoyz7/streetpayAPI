@@ -12,14 +12,42 @@ using System.Security.Claims;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using BCrypt.Net;
-using System.Numerics;
-using System.Xml.Linq;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Streetpay.API;
+using Microsoft.OpenApi.Models; // Added for Swagger security scheme
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Register services
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "StreetPay API", Version = "v1" });
+    // Add JWT Bearer authentication support
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description = "JWT Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {token}\"",
+        Name = "Authorization",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT"
+    });
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            new string[] { }
+        }
+    });
+});
 builder.Services.AddDbContext<StreetPayDbContext>(options =>
     options.UseSqlite("Data Source=streetpay.db;Pooling=false"));
 builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection("Encryption"));
@@ -29,11 +57,35 @@ builder.Services.AddScoped<IRsaCryptographyService, RsaCryptographyService>();
 builder.Services.AddScoped<Encryption>();
 builder.Services.AddScoped<KeyManagementService>();
 
+// Add JWT authentication
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+}).AddJwtBearer(options =>
+{
+    var key = Encoding.ASCII.GetBytes(builder.Configuration["Jwt:Secret"] ?? throw new InvalidOperationException("JWT secret not configured."));
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(key),
+        ValidateIssuer = false,
+        ValidateAudience = false,
+        ValidateLifetime = true,
+        ClockSkew = TimeSpan.Zero
+    };
+});
+
+// Add authorization services
+builder.Services.AddAuthorization();
+
 var app = builder.Build();
 
 // Middleware
 app.UseSwagger();
 app.UseSwaggerUI();
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapGet("/", () => Results.Ok(new { Message = "StreetPay Offline API is live" }));
 
@@ -62,11 +114,14 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
     {
         await db.SaveChangesAsync();
 
+        // Generate initial transaction key
+        var transactionKey = keyService.GenerateTransactionKey(newUser.Id);
         var payload = new 
         {
             newUser.Id,
             newUser.Name,
-            newUser.Phone
+            newUser.Phone,
+            TransactionKey = transactionKey
         };
         var encrypted = encryption.EncryptResponse(payload);
         return Results.Created($"/auth/profile/{newUser.Id}", encrypted);
@@ -106,12 +161,15 @@ app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db,
     var tokenHandler = new JwtSecurityTokenHandler();
     var token = tokenHandler.CreateToken(tokenDescriptor);
 
+    // Generate or retrieve transaction key
+    var transactionKey = keyService.GenerateTransactionKey(user.Id);
     var payload = new
     {
         id = user.Id,
         name = user.Name,
         phone = user.Phone,
-        token = tokenHandler.WriteToken(token)
+        token = tokenHandler.WriteToken(token),
+        transactionKey
     };
     return Results.Ok(encryption.EncryptResponse(payload));
 });
@@ -131,7 +189,7 @@ app.MapGet("/auth/profile/{id}", async (int id, StreetPayDbContext db, Encryptio
     };
     var encrypted = encryption.EncryptResponse(payload);
     return Results.Ok(encrypted);
-});
+}).RequireAuthorization();
 
 // Wallet
 app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db, Encryption encryption) =>
@@ -147,7 +205,7 @@ app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db, Encryption encr
     };
     var encrypted = encryption.EncryptResponse(wallet);
     return Results.Ok(encrypted);
-});
+}).RequireAuthorization();
 
 // Update wallet balance 
 app.MapPut("/wallet/{id}", async (int id, WalletUpdateRequest wallet, StreetPayDbContext db) =>
@@ -179,7 +237,7 @@ app.MapPut("/wallet/{id}", async (int id, WalletUpdateRequest wallet, StreetPayD
         Console.WriteLine($"Error updating wallet: {ex.Message}");
         return Results.StatusCode(500);
     }
-});
+}).RequireAuthorization();
 
 // Create new transaction 
 app.MapPost("/transactions", async (Transaction txn, StreetPayDbContext db, Encryption encryption) =>
@@ -210,7 +268,7 @@ app.MapPost("/transactions", async (Transaction txn, StreetPayDbContext db, Encr
         Console.WriteLine($"Error creating transaction: {ex.Message}");
         return Results.StatusCode(500);
     }
-});
+}).RequireAuthorization();
 
 // Get all transactions 
 app.MapGet("/transactions", async (StreetPayDbContext db, Encryption encryption) =>
@@ -218,7 +276,7 @@ app.MapGet("/transactions", async (StreetPayDbContext db, Encryption encryption)
     var all = await db.Transactions.ToListAsync();
     var encrypted = encryption.EncryptResponse(all);
     return Results.Ok(encrypted);
-});
+}).RequireAuthorization();
 
 // Pending transactions 
 app.MapGet("/transactions/pending", async (StreetPayDbContext db, Encryption encryption) =>
@@ -228,10 +286,14 @@ app.MapGet("/transactions/pending", async (StreetPayDbContext db, Encryption enc
         .ToListAsync();
     var encrypted = encryption.EncryptResponse(pending);
     return Results.Ok(encrypted);
-});
+}).RequireAuthorization();
 
 // Get user by phone number 
-app.MapGet("/users/by-phone/{phone}", async (string phone, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
+app.MapGet("/users/by-phone/{phone}", async (
+    string phone,
+    StreetPayDbContext db,
+    Encryption encryption,
+    KeyManagementService keyService) =>
 {
     if (string.IsNullOrWhiteSpace(phone))
         return Results.BadRequest(new { Message = "Phone number is required" });
@@ -240,83 +302,158 @@ app.MapGet("/users/by-phone/{phone}", async (string phone, StreetPayDbContext db
     if (user == null)
         return Results.NotFound(new { Message = "User not found" });
 
-    var publicKey = keyService.GetPublicKeyForUser(user.Id);
-    var payload = new { id = user.Id, name = user.Name, publicKey };
-    var encrypted = encryption.EncryptResponse(payload);
-    return Results.Ok(encrypted);
-});
-
-// Send money online
-app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
-{
-    var validationResults = new List<ValidationResult>();
-    if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
-    {
-        return Results.BadRequest(new { Message = "Invalid transaction data", Errors = validationResults.Select(v => v.ErrorMessage) });
-    }
-
-    var sender = await db.Users.FindAsync(dto.SenderId);
-    var receiver = await db.Users.FindAsync(dto.ReceiverId);
-
-    if (sender == null || receiver == null)
-        return Results.BadRequest(new { Message = "Sender or receiver not found" });
-
-    if (dto.Amount <= 0)
-        return Results.BadRequest(new { Message = "Invalid amount" });
-
-    if (sender.MainBalance < dto.Amount)
-        return Results.BadRequest(new { Message = "Insufficient balance" });
-
-    if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId))
-        return Results.Conflict(new { Message = "Transaction already exists" });
-
-    using var transaction = await db.Database.BeginTransactionAsync();
+    string? publicKey = null;
     try
     {
-        sender.MainBalance -= dto.Amount;
-        receiver.MainBalance += dto.Amount;
+        publicKey = keyService.GetPublicKeyForUser(user.Id);
+    }
+    catch (KeyNotFoundException)
+    {
+        publicKey = null;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[KeyService Error] {ex.Message}");
+        publicKey = null;
+    }
 
-        var txn = new Transaction
-        {
-            TransactionId = dto.TransactionId,
-            SenderId = sender.Id,
-            ReceiverId = receiver.Id,
-            SenderPhone = sender.Phone,
-            ReceiverPhone = receiver.Phone,
-            Amount = dto.Amount,
-            SenderNewBalance = sender.MainBalance,
-            ReceiverNewBalance = receiver.MainBalance,
-            Currency = "NGN",
-            Status = "sent",
-            IsSynced = true,
-            Timestamp = DateTime.UtcNow,
-            Type = "online",
-            Used = true,
-            Signature = string.Empty
-        };
+    var payload = new
+    {
+        id = user.Id,
+        name = user.Name,
+        publicKey
+    };
 
-        db.Transactions.Add(txn);
-        await db.SaveChangesAsync();
-        await transaction.CommitAsync();
-        var payload = new
-        {
-            message = "Transaction successful",
-            transactionId = txn.TransactionId,
-            amount = txn.Amount,
-            to = receiver.Name,
-            senderNewBalance = txn.SenderNewBalance,
-            receiverNewBalance = txn.ReceiverNewBalance
-        };
+    var encrypted = encryption.EncryptResponse(payload);
+    return Results.Ok(encrypted);
+}).RequireAuthorization();
+
+// Get transaction key
+app.MapGet("/keys/transaction", async (HttpContext context, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
+{
+    var userIdClaim = context.User.FindFirst("id")?.Value;
+    if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out var userId))
+        return Results.Unauthorized();
+
+    var user = await db.Users.FindAsync(userId);
+    if (user == null)
+        return Results.NotFound(new { Message = "User not found" });
+
+    try
+    {
+        var transactionKey = keyService.GenerateTransactionKey(userId);
+        var payload = new { key = transactionKey };
         var encrypted = encryption.EncryptResponse(payload);
         return Results.Ok(encrypted);
     }
     catch (Exception ex)
     {
-        await transaction.RollbackAsync();
-        Console.WriteLine($"Error during online transaction: {ex.Message}");
+        Console.WriteLine($"Error generating transaction key: {ex.Message}");
         return Results.StatusCode(500);
     }
-});
+}).RequireAuthorization();
+
+// Send money online
+app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
+{
+    try
+    {
+        var validationResults = new List<ValidationResult>();
+        if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
+        {
+            Console.WriteLine($"Validation failed: {string.Join(", ", validationResults.Select(v => v.ErrorMessage))}");
+            return Results.BadRequest(new { Message = "Invalid transaction data", Errors = validationResults.Select(v => v.ErrorMessage) });
+        }
+
+        Console.WriteLine($"Received OnlineTransactionDto: {System.Text.Json.JsonSerializer.Serialize(dto)}");
+
+        var sender = await db.Users.FindAsync(dto.SenderId);
+        if (sender == null)
+        {
+            Console.WriteLine($"Sender not found: SenderId={dto.SenderId}");
+            return Results.BadRequest(new { Message = "Sender not found" });
+        }
+
+        var receiver = await db.Users.FindAsync(dto.ReceiverId);
+        if (receiver == null)
+        {
+            Console.WriteLine($"Receiver not found: ReceiverId={dto.ReceiverId}");
+            return Results.BadRequest(new { Message = "Receiver not found" });
+        }
+
+        if (dto.Amount <= 0)
+        {
+            Console.WriteLine($"Invalid amount: Amount={dto.Amount}");
+            return Results.BadRequest(new { Message = "Invalid amount" });
+        }
+
+        if (sender.MainBalance < dto.Amount)
+        {
+            Console.WriteLine($"Insufficient balance: SenderId={dto.SenderId}, MainBalance={sender.MainBalance}, Amount={dto.Amount}");
+            return Results.BadRequest(new { Message = "Insufficient balance" });
+        }
+
+        if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId))
+        {
+            Console.WriteLine($"Transaction already exists: TransactionId={dto.TransactionId}");
+            return Results.Conflict(new { Message = "Transaction already exists" });
+        }
+
+        using var transaction = await db.Database.BeginTransactionAsync();
+        try
+        {
+            sender.MainBalance -= dto.Amount;
+            receiver.MainBalance += dto.Amount;
+
+            var txn = new Transaction
+            {
+                TransactionId = dto.TransactionId,
+                SenderId = sender.Id,
+                ReceiverId = receiver.Id,
+                SenderPhone = sender.Phone,
+                ReceiverPhone = receiver.Phone,
+                Amount = dto.Amount,
+                SenderNewBalance = sender.MainBalance,
+                ReceiverNewBalance = receiver.MainBalance,
+                Currency = "NGN",
+                Status = "sent",
+                IsSynced = true,
+                Timestamp = DateTime.UtcNow,
+                Type = "online",
+                Used = true,
+                Signature = string.Empty
+            };
+
+            db.Transactions.Add(txn);
+            await db.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            var payload = new
+            {
+                message = "Transaction successful",
+                transactionId = txn.TransactionId,
+                amount = txn.Amount,
+                to = receiver.Name,
+                senderNewBalance = txn.SenderNewBalance,
+                receiverNewBalance = txn.ReceiverNewBalance
+            };
+            Console.WriteLine($"Sending response payload: {System.Text.Json.JsonSerializer.Serialize(payload)}");
+            var encrypted = encryption.EncryptResponse(payload);
+            return Results.Ok(encrypted);
+        }
+        catch (Exception ex)
+        {
+            await transaction.RollbackAsync();
+            Console.WriteLine($"Transaction error: {ex.Message}, StackTrace: {ex.StackTrace}");
+            return Results.StatusCode(500);
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Unexpected error in /transactions/send: {ex.Message}, StackTrace: {ex.StackTrace}");
+        return Results.StatusCode(500);
+    }
+}).RequireAuthorization();
 
 // Receive offline
 app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
@@ -336,6 +473,50 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
     if (dto.Amount <= 0)
         return Results.BadRequest(new { Message = "Invalid amount" });
 
+    // Verify transaction signature
+    try
+    {
+        var transactionKey = keyService.GetTransactionKey(sender.Id);
+        var signingPayload = new
+        {
+            dto.TransactionId,
+            dto.ReceiverPhone,
+            dto.SenderPhone,
+            dto.Amount,
+            senderNewBalance = dto.SenderNewBalance,
+            receiverNewBalance = dto.ReceiverNewBalance,
+            dto.Currency,
+            dto.Timestamp,
+            used = false,
+            type = "offline",
+            status = "pending",
+            isSync = false,
+            dto.Nonce
+        };
+        var payloadString = System.Text.Json.JsonSerializer.Serialize(signingPayload, new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = false,
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            DictionaryKeyPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+        });
+        var expectedSignature = Convert.ToBase64String(
+            System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(payloadString + transactionKey)
+            )
+        );
+
+        if (dto.Signature != expectedSignature)
+        {
+            Console.WriteLine($"Invalid signature for transaction {dto.TransactionId}");
+            return Results.BadRequest(new { Message = "Invalid transaction signature" });
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error verifying signature: {ex.Message}");
+        return Results.BadRequest(new { Message = "Signature verification failed" });
+    }
+
     var txn = new Transaction
     {
         TransactionId = dto.TransactionId,
@@ -344,15 +525,15 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
         SenderPhone = dto.SenderPhone,
         ReceiverPhone = dto.ReceiverPhone,
         Amount = dto.Amount,
-        SenderNewBalance = sender.MainBalance, 
-        ReceiverNewBalance = receiver.MainBalance + dto.Amount,
-        Currency = "NGN",
+        SenderNewBalance = dto.SenderNewBalance ?? sender.MainBalance,
+        ReceiverNewBalance = dto.ReceiverNewBalance ?? receiver.MainBalance + dto.Amount,
+        Currency = dto.Currency,
         Status = "pending",
         IsSynced = false,
         Timestamp = dto.Timestamp,
         Type = "offline",
         Used = true,
-        Signature = string.Empty
+        Signature = dto.Signature
     };
 
     db.Transactions.Add(txn);
@@ -384,7 +565,7 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
         Console.WriteLine($"Error during offline transaction: {ex.Message}");
         return Results.StatusCode(500);
     }
-});
+}).RequireAuthorization();
 
 // Sync pending transactions
 app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
@@ -418,9 +599,49 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                 continue;
             }
 
-            if (sender.MainBalance < dto.Amount)
+            // Verify transaction signature
+            try
             {
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Insufficient sender balance" });
+                var transactionKey = keyService.GetTransactionKey(sender.Id);
+                var signingPayload = new
+                {
+                    dto.TransactionId,
+                    dto.ReceiverPhone,
+                    dto.SenderPhone,
+                    dto.Amount,
+                    senderNewBalance = dto.SenderNewBalance,
+                    receiverNewBalance = dto.ReceiverNewBalance,
+                    dto.Currency,
+                    dto.Timestamp,
+                    used = false,
+                    type = "offline",
+                    status = "pending",
+                    isSync = false,
+                    dto.Nonce
+                };
+                var payloadString = System.Text.Json.JsonSerializer.Serialize(signingPayload, new System.Text.Json.JsonSerializerOptions
+                {
+                    WriteIndented = false,
+                    PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+                    DictionaryKeyPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+                });
+                var expectedSignature = Convert.ToBase64String(
+                    System.Security.Cryptography.SHA256.HashData(
+                        Encoding.UTF8.GetBytes(payloadString + transactionKey)
+                    )
+                );
+
+                if (dto.Signature != expectedSignature)
+                {
+                    Console.WriteLine($"Invalid signature for transaction {dto.TransactionId}");
+                    results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid transaction signature" });
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error verifying signature: {ex.Message}");
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Signature verification failed" });
                 continue;
             }
 
@@ -453,13 +674,13 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                     Amount = dto.Amount,
                     SenderNewBalance = sender.MainBalance - dto.Amount,
                     ReceiverNewBalance = receiver.MainBalance + dto.Amount,
-                    Currency = "NGN",
+                    Currency = dto.Currency,
                     Status = "synced",
                     IsSynced = true,
                     Timestamp = dto.Timestamp,
                     Type = "offline",
                     Used = true,
-                    Signature = string.Empty
+                    Signature = dto.Signature
                 };
                 db.Transactions.Add(txn);
             }
@@ -481,7 +702,7 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
         Console.WriteLine($"Error during sync: {ex.Message}");
         return Results.StatusCode(500);
     }
-});
+}).RequireAuthorization();
 
 // Transaction history
 app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbContext db, Encryption encryption) =>
@@ -510,8 +731,8 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
             receiverPhone = txn.ReceiverPhone,
             receiverName = receiver?.Name ?? txn.ReceiverPhone,
             amount = txn.Amount,
-            senderNewBalance = txn.SenderNewBalance, 
-            receiverNewBalance = txn.ReceiverNewBalance, 
+            senderNewBalance = txn.SenderNewBalance,
+            receiverNewBalance = txn.ReceiverNewBalance,
             currency = txn.Currency,
             timestamp = txn.Timestamp.ToString("o"),
             status = txn.Status,
@@ -521,6 +742,6 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
     }
     var encrypted = encryption.EncryptResponse(response);
     return Results.Ok(encrypted);
-});
+}).RequireAuthorization();
 
 app.Run();

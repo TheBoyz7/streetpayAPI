@@ -51,5 +51,26 @@ namespace Streetpay.API.Models.DTOs
         /// Proposed receiver's new balance (optional for validation).
         /// </summary>
         public decimal? ReceiverNewBalance { get; set; }
+
+        /// <summary>
+        /// Currency of the transaction (e.g., NGN).
+        /// </summary>
+        [Required]
+        [MaxLength(3)]
+        public string Currency { get; set; } = "NGN";
+
+        /// <summary>
+        /// Nonce for transaction uniqueness.
+        /// </summary>
+        [Required]
+        [MaxLength(64)]
+        public string Nonce { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Signature of the transaction payload.
+        /// </summary>
+        [Required]
+        [MaxLength(256)]
+        public string Signature { get; set; } = string.Empty;
     }
 }

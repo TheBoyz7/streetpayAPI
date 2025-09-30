@@ -1,6 +1,9 @@
 using Microsoft.Extensions.Options;
+using System;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.EntityFrameworkCore;
 using Streetpay.API.Models;
 
 namespace Streetpay.API.Services
@@ -9,15 +12,77 @@ namespace Streetpay.API.Services
     {
         private readonly EncryptionOptions _encryptionOptions;
         private readonly JwtOptions _jwtOptions;
+        private readonly StreetPayDbContext _dbContext;
         private readonly Dictionary<int, string> _userPublicKeys;
+        private readonly Dictionary<int, string> _transactionKeys;
 
         public KeyManagementService(
             IOptions<EncryptionOptions> encryptionOptions,
-            IOptions<JwtOptions> jwtOptions)
+            IOptions<JwtOptions> jwtOptions,
+            StreetPayDbContext dbContext)
         {
             _encryptionOptions = encryptionOptions.Value ?? throw new ArgumentNullException(nameof(encryptionOptions));
             _jwtOptions = jwtOptions.Value ?? throw new ArgumentNullException(nameof(jwtOptions));
+            _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
             _userPublicKeys = new Dictionary<int, string>();
+            _transactionKeys = new Dictionary<int, string>();
+        }
+
+        /// <summary>
+        /// Generate a new transaction key for a user.
+        /// </summary>
+        public string GenerateTransactionKey(int userId)
+        {
+            // Generate a secure random key
+            byte[] keyBytes = new byte[32];
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(keyBytes);
+            }
+            string transactionKey = Convert.ToBase64String(keyBytes);
+
+            // Store in database
+            var keyEntry = new TransactionKey
+            {
+                UserId = userId,
+                Key = transactionKey,
+                CreatedAt = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.AddHours(24) // Key expires in 24 hours
+            };
+
+            _dbContext.TransactionKeys.Add(keyEntry);
+            _dbContext.SaveChanges();
+
+            // Cache in memory
+            _transactionKeys[userId] = transactionKey;
+
+            return transactionKey;
+        }
+
+        /// <summary>
+        /// Retrieve the transaction key for a user.
+        /// </summary>
+        public string GetTransactionKey(int userId)
+        {
+            // Check in-memory cache first
+            if (_transactionKeys.TryGetValue(userId, out var key))
+            {
+                return key;
+            }
+
+            // Fallback to database
+            var keyEntry = _dbContext.TransactionKeys
+                .Where(k => k.UserId == userId && k.ExpiresAt > DateTime.UtcNow)
+                .OrderByDescending(k => k.CreatedAt)
+                .FirstOrDefault();
+
+            if (keyEntry == null)
+            {
+                throw new KeyNotFoundException($"No valid transaction key found for user {userId}");
+            }
+
+            _transactionKeys[userId] = keyEntry.Key;
+            return keyEntry.Key;
         }
 
         /// <summary>
@@ -27,7 +92,6 @@ namespace Streetpay.API.Services
         {
             if (string.IsNullOrWhiteSpace(_jwtOptions.Secret))
                 throw new InvalidOperationException("JWT secret not configured. Please check appsettings.json under 'Jwt:Secret'.");
-
             return _jwtOptions.Secret;
         }
 
