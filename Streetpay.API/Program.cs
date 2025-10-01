@@ -781,4 +781,4 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
     return Results.Ok(encrypted);
 }).RequireAuthorization();
 
-app.Run();
+app.Run(); 
