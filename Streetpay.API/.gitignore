@@ -1,0 +1,35 @@
+# Binaries and build outputs
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+
+# Visual Studio/IDE files
+.vs/
+*.user
+*.suo
+*.sln.docstates
+
+# User-specific files
+*.userprefs
+*.cache
+
+# Secrets and env files
+appsettings.Development.json
+*.secrets
+.env
+
+# Database files (if using SQLite locally)
+*.db
+*.db-journal
+
+# Logs and temp
+[Ll]ogs/
+[Tt]emp/
+*.tmp
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
