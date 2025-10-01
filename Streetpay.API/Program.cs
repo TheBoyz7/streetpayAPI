@@ -14,7 +14,7 @@ using System.Text;
 using BCrypt.Net;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Streetpay.API;
-using Microsoft.OpenApi.Models; // Added for Swagger security scheme
+using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,7 +23,6 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
     c.SwaggerDoc("v1", new OpenApiInfo { Title = "StreetPay API", Version = "v1" });
-    // Add JWT Bearer authentication support
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Description = "JWT Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {token}\"",
@@ -353,6 +352,27 @@ app.MapGet("/keys/transaction", async (HttpContext context, StreetPayDbContext d
     }
 }).RequireAuthorization();
 
+// Get transaction key by senderId
+app.MapGet("/keys/transaction/{senderId}", async (int senderId, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
+{
+    var user = await db.Users.FindAsync(senderId);
+    if (user == null)
+        return Results.NotFound(new { Message = "User not found" });
+
+    try
+    {
+        var transactionKey = keyService.GetTransactionKey(senderId);
+        var payload = new { key = transactionKey };
+        var encrypted = encryption.EncryptResponse(payload);
+        return Results.Ok(encrypted);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error fetching transaction key for sender {senderId}: {ex.Message}");
+        return Results.StatusCode(500);
+    }
+}).RequireAuthorization();
+
 // Send money online
 app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
 {
@@ -472,38 +492,45 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
 
     if (dto.Amount <= 0)
         return Results.BadRequest(new { Message = "Invalid amount" });
-
-    // Verify transaction signature
     try
     {
         var transactionKey = keyService.GetTransactionKey(sender.Id);
-        var signingPayload = new
+        var signingPayload = new Dictionary<string, object>
         {
-            dto.TransactionId,
-            dto.ReceiverPhone,
-            dto.SenderPhone,
-            dto.Amount,
-            senderNewBalance = dto.SenderNewBalance,
-            receiverNewBalance = dto.ReceiverNewBalance,
-            dto.Currency,
-            dto.Timestamp,
-            used = false,
-            type = "offline",
-            status = "pending",
-            isSync = false,
-            dto.Nonce
+            { "amount", dto.Amount },
+            { "currency", dto.Currency },
+            { "isSync", false },
+            { "nonce", dto.Nonce },
+            { "receiverPhone", dto.ReceiverPhone },
+            { "senderNewBalance", dto.SenderNewBalance ?? sender.MainBalance },
+            { "senderPhone", dto.SenderPhone },
+            { "senderId", sender.Id },
+            { "status", "pending" },
+            { "timestamp", dto.Timestamp.ToString("o") },
+            { "transactionId", dto.TransactionId },
+            { "type", "offline" },
+            { "used", false }
         };
-        var payloadString = System.Text.Json.JsonSerializer.Serialize(signingPayload, new System.Text.Json.JsonSerializerOptions
+
+        // Sort keys alphabetically (same as frontend)
+        var sortedPayload = signingPayload.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value);
+        
+        var payloadString = System.Text.Json.JsonSerializer.Serialize(sortedPayload, new System.Text.Json.JsonSerializerOptions
         {
-            WriteIndented = false,
-            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
-            DictionaryKeyPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+            WriteIndented = false
         });
+        
+        Console.WriteLine($"Backend signing payload for {dto.TransactionId}: {payloadString}");
+        Console.WriteLine($"Backend transaction key: {transactionKey}");
+        
         var expectedSignature = Convert.ToBase64String(
             System.Security.Cryptography.SHA256.HashData(
                 Encoding.UTF8.GetBytes(payloadString + transactionKey)
             )
         );
+        
+        Console.WriteLine($"Backend expected signature: {expectedSignature}");
+        Console.WriteLine($"Backend received signature: {dto.Signature}");
 
         if (dto.Signature != expectedSignature)
         {
@@ -567,7 +594,7 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
     }
 }).RequireAuthorization();
 
-// Sync pending transactions
+// transactions/sync endpoint 
 app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
     var validationResults = new List<ValidationResult>();
@@ -598,38 +625,47 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                 results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid amount" });
                 continue;
             }
-
-            // Verify transaction signature
             try
             {
                 var transactionKey = keyService.GetTransactionKey(sender.Id);
-                var signingPayload = new
+                
+                // Create signing payload with EXACT same structure as frontend
+                var signingPayload = new Dictionary<string, object>
                 {
-                    dto.TransactionId,
-                    dto.ReceiverPhone,
-                    dto.SenderPhone,
-                    dto.Amount,
-                    senderNewBalance = dto.SenderNewBalance,
-                    receiverNewBalance = dto.ReceiverNewBalance,
-                    dto.Currency,
-                    dto.Timestamp,
-                    used = false,
-                    type = "offline",
-                    status = "pending",
-                    isSync = false,
-                    dto.Nonce
+                    { "amount", dto.Amount },
+                    { "currency", dto.Currency },
+                    { "isSync", false },
+                    { "nonce", dto.Nonce },
+                    { "receiverPhone", dto.ReceiverPhone },
+                    { "senderNewBalance", dto.SenderNewBalance ?? sender.MainBalance },
+                    { "senderPhone", dto.SenderPhone },
+                    { "senderId", sender.Id },
+                    { "status", "pending" },
+                    { "timestamp", dto.Timestamp.ToString("o") },
+                    { "transactionId", dto.TransactionId },
+                    { "type", "offline" },
+                    { "used", false }
                 };
-                var payloadString = System.Text.Json.JsonSerializer.Serialize(signingPayload, new System.Text.Json.JsonSerializerOptions
+
+                // Sort keys alphabetically (same as frontend)
+                var sortedPayload = signingPayload.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value);
+                
+                var payloadString = System.Text.Json.JsonSerializer.Serialize(sortedPayload, new System.Text.Json.JsonSerializerOptions
                 {
-                    WriteIndented = false,
-                    PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
-                    DictionaryKeyPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+                    WriteIndented = false
                 });
+                
+                Console.WriteLine($"Backend sync signing payload for {dto.TransactionId}: {payloadString}");
+                Console.WriteLine($"Backend sync transaction key: {transactionKey}");
+                
                 var expectedSignature = Convert.ToBase64String(
                     System.Security.Cryptography.SHA256.HashData(
                         Encoding.UTF8.GetBytes(payloadString + transactionKey)
                     )
                 );
+                
+                Console.WriteLine($"Backend sync expected signature: {expectedSignature}");
+                Console.WriteLine($"Backend sync received signature: {dto.Signature}");
 
                 if (dto.Signature != expectedSignature)
                 {
@@ -703,6 +739,7 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
         return Results.StatusCode(500);
     }
 }).RequireAuthorization();
+
 
 // Transaction history
 app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbContext db, Encryption encryption) =>
