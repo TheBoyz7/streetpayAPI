@@ -55,6 +55,10 @@ namespace Streetpay.API.Models
         [MaxLength(256)]
         public string Signature { get; set; } = string.Empty;
 
+        [Required]
+        [MaxLength(64)]
+        public string Nonce { get; set; } = string.Empty;
+
         public virtual User Sender { get; set; } 
 
         public virtual User Receiver { get; set; } 

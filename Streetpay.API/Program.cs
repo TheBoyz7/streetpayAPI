@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Streetpay.API;
 using Microsoft.EntityFrameworkCore;
 using Streetpay.API.Helpers;
 using Streetpay.API.Interfaces;
@@ -13,7 +14,6 @@ using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using BCrypt.Net;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Streetpay.API;
 using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -247,8 +247,8 @@ app.MapPost("/transactions", async (Transaction txn, StreetPayDbContext db, Encr
         return Results.BadRequest(new { Message = "Invalid transaction data", Errors = validationResults.Select(v => v.ErrorMessage) });
     }
 
-    if (await db.Transactions.AnyAsync(t => t.TransactionId == txn.TransactionId))
-        return Results.Conflict(new { Message = "Transaction already exists" });
+    if (await db.Transactions.AnyAsync(t => t.TransactionId == txn.TransactionId || t.Nonce == txn.Nonce))
+        return Results.Conflict(new { Message = "Transaction or nonce already exists" });
 
     db.Transactions.Add(txn);
     try
@@ -373,6 +373,55 @@ app.MapGet("/keys/transaction/{senderId}", async (int senderId, StreetPayDbConte
     }
 }).RequireAuthorization();
 
+// Sync device-generated keys
+app.MapPost("/keys/sync", async (KeySyncDto dto, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService, HttpContext context) =>
+{
+    var validationResults = new List<ValidationResult>();
+    if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
+    {
+        Console.WriteLine($"Validation failed for key sync: {string.Join(", ", validationResults.Select(v => v.ErrorMessage))}");
+        return Results.BadRequest(new { Message = "Invalid key data", Errors = validationResults.Select(v => v.ErrorMessage) });
+    }
+
+    var userIdClaim = context.User.FindFirst("id")?.Value;
+    if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out var authUserId) || authUserId != dto.userId)
+    {
+        Console.WriteLine($"Unauthorized key sync attempt: AuthUserId={userIdClaim}, ProvidedUserId={dto.userId}");
+        return Results.Unauthorized();
+    }
+
+    var user = await db.Users.FindAsync(dto.userId);
+    if (user == null)
+    {
+        Console.WriteLine($"User not found: UserId={dto.userId}");
+        return Results.NotFound(new { Message = "User not found" });
+    }
+
+    try
+    {
+        // Store the key using KeyManagementService
+        keyService.StoreTransactionKey(dto.userId, dto.key, DateTimeOffset.FromUnixTimeMilliseconds(dto.created).UtcDateTime);
+        var payload = new { success = true, message = "Key synced successfully" };
+        var encrypted = encryption.EncryptResponse(payload);
+        return Results.Ok(encrypted);
+    }
+    catch (InvalidOperationException ex)
+    {
+        Console.WriteLine($"Key sync failed: {ex.Message}");
+        return Results.Conflict(new { Message = ex.Message });
+    }
+    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.WriteLine($"Database locked during key sync: {ex.Message}");
+        return Results.StatusCode(503);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error syncing key: {ex.Message}");
+        return Results.StatusCode(500);
+    }
+}).RequireAuthorization();
+
 // Send money online
 app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
 {
@@ -413,10 +462,10 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
             return Results.BadRequest(new { Message = "Insufficient balance" });
         }
 
-        if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId))
+        if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId || t.Nonce == dto.Nonce))
         {
-            Console.WriteLine($"Transaction already exists: TransactionId={dto.TransactionId}");
-            return Results.Conflict(new { Message = "Transaction already exists" });
+            Console.WriteLine($"Transaction or nonce already exists: TransactionId={dto.TransactionId}, Nonce={dto.Nonce}");
+            return Results.Conflict(new { Message = "Transaction or nonce already exists" });
         }
 
         using var transaction = await db.Database.BeginTransactionAsync();
@@ -441,7 +490,8 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
                 Timestamp = DateTime.UtcNow,
                 Type = "online",
                 Used = true,
-                Signature = string.Empty
+                Signature = dto.Signature ?? string.Empty,
+                Nonce = dto.Nonce
             };
 
             db.Transactions.Add(txn);
@@ -476,7 +526,7 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
 }).RequireAuthorization();
 
 // Receive offline
-app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
+app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
 {
     var validationResults = new List<ValidationResult>();
     if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
@@ -492,57 +542,12 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
 
     if (dto.Amount <= 0)
         return Results.BadRequest(new { Message = "Invalid amount" });
-    try
-    {
-        var transactionKey = keyService.GetTransactionKey(sender.Id);
-        var signingPayload = new Dictionary<string, object>
-        {
-            { "amount", dto.Amount },
-            { "currency", dto.Currency },
-            { "isSync", false },
-            { "nonce", dto.Nonce },
-            { "receiverPhone", dto.ReceiverPhone },
-            { "senderNewBalance", dto.SenderNewBalance ?? sender.MainBalance },
-            { "senderPhone", dto.SenderPhone },
-            { "senderId", sender.Id },
-            { "status", "pending" },
-            { "timestamp", dto.Timestamp.ToString("o") },
-            { "transactionId", dto.TransactionId },
-            { "type", "offline" },
-            { "used", false }
-        };
 
-        // Sort keys alphabetically (same as frontend)
-        var sortedPayload = signingPayload.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value);
-        
-        var payloadString = System.Text.Json.JsonSerializer.Serialize(sortedPayload, new System.Text.Json.JsonSerializerOptions
-        {
-            WriteIndented = false
-        });
-        
-        Console.WriteLine($"Backend signing payload for {dto.TransactionId}: {payloadString}");
-        Console.WriteLine($"Backend transaction key: {transactionKey}");
-        
-        var expectedSignature = Convert.ToBase64String(
-            System.Security.Cryptography.SHA256.HashData(
-                Encoding.UTF8.GetBytes(payloadString + transactionKey)
-            )
-        );
-        
-        Console.WriteLine($"Backend expected signature: {expectedSignature}");
-        Console.WriteLine($"Backend received signature: {dto.Signature}");
+    if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId || t.Nonce == dto.Nonce))
+        return Results.Conflict(new { Message = "Transaction or nonce already exists" });
 
-        if (dto.Signature != expectedSignature)
-        {
-            Console.WriteLine($"Invalid signature for transaction {dto.TransactionId}");
-            return Results.BadRequest(new { Message = "Invalid transaction signature" });
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"Error verifying signature: {ex.Message}");
-        return Results.BadRequest(new { Message = "Signature verification failed" });
-    }
+    if (DateTime.UtcNow - dto.Timestamp > TimeSpan.FromDays(7))
+        return Results.BadRequest(new { Message = "Transaction expired" });
 
     var txn = new Transaction
     {
@@ -560,7 +565,8 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
         Timestamp = dto.Timestamp,
         Type = "offline",
         Used = true,
-        Signature = dto.Signature
+        Signature = dto.Signature ?? string.Empty,
+        Nonce = dto.Nonce
     };
 
     db.Transactions.Add(txn);
@@ -582,7 +588,8 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
             txn.Timestamp,
             txn.Type,
             txn.Used,
-            txn.Signature
+            txn.Signature,
+            txn.Nonce
         };
         var encrypted = encryption.EncryptResponse(payload);
         return Results.Created($"/transactions/{txn.Id}", encrypted);
@@ -595,7 +602,7 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
 }).RequireAuthorization();
 
 // transactions/sync endpoint 
-app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
+app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption) =>
 {
     var validationResults = new List<ValidationResult>();
     var results = new List<object>();
@@ -625,63 +632,14 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                 results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid amount" });
                 continue;
             }
-            try
-            {
-                var transactionKey = keyService.GetTransactionKey(sender.Id);
-                
-                // Create signing payload with EXACT same structure as frontend
-                var signingPayload = new Dictionary<string, object>
-                {
-                    { "amount", dto.Amount },
-                    { "currency", dto.Currency },
-                    { "isSync", false },
-                    { "nonce", dto.Nonce },
-                    { "receiverPhone", dto.ReceiverPhone },
-                    { "senderNewBalance", dto.SenderNewBalance ?? sender.MainBalance },
-                    { "senderPhone", dto.SenderPhone },
-                    { "senderId", sender.Id },
-                    { "status", "pending" },
-                    { "timestamp", dto.Timestamp.ToString("o") },
-                    { "transactionId", dto.TransactionId },
-                    { "type", "offline" },
-                    { "used", false }
-                };
 
-                // Sort keys alphabetically (same as frontend)
-                var sortedPayload = signingPayload.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value);
-                
-                var payloadString = System.Text.Json.JsonSerializer.Serialize(sortedPayload, new System.Text.Json.JsonSerializerOptions
-                {
-                    WriteIndented = false
-                });
-                
-                Console.WriteLine($"Backend sync signing payload for {dto.TransactionId}: {payloadString}");
-                Console.WriteLine($"Backend sync transaction key: {transactionKey}");
-                
-                var expectedSignature = Convert.ToBase64String(
-                    System.Security.Cryptography.SHA256.HashData(
-                        Encoding.UTF8.GetBytes(payloadString + transactionKey)
-                    )
-                );
-                
-                Console.WriteLine($"Backend sync expected signature: {expectedSignature}");
-                Console.WriteLine($"Backend sync received signature: {dto.Signature}");
-
-                if (dto.Signature != expectedSignature)
-                {
-                    Console.WriteLine($"Invalid signature for transaction {dto.TransactionId}");
-                    results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid transaction signature" });
-                    continue;
-                }
-            }
-            catch (Exception ex)
+            if (DateTime.UtcNow - dto.Timestamp > TimeSpan.FromDays(7))
             {
-                Console.WriteLine($"Error verifying signature: {ex.Message}");
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Signature verification failed" });
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Transaction expired" });
                 continue;
             }
 
-            var existingTxn = await db.Transactions.FirstOrDefaultAsync(t => t.TransactionId == dto.TransactionId);
+            var existingTxn = await db.Transactions.FirstOrDefaultAsync(t => t.TransactionId == dto.TransactionId || t.Nonce == dto.Nonce);
             if (existingTxn != null)
             {
                 if (existingTxn.IsSynced)
@@ -697,6 +655,8 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                 existingTxn.Used = true;
                 existingTxn.SenderNewBalance = sender.MainBalance - dto.Amount;
                 existingTxn.ReceiverNewBalance = receiver.MainBalance + dto.Amount;
+                existingTxn.Signature = dto.Signature ?? string.Empty;
+                existingTxn.Nonce = dto.Nonce;
             }
             else
             {
@@ -716,7 +676,8 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                     Timestamp = dto.Timestamp,
                     Type = "offline",
                     Used = true,
-                    Signature = dto.Signature
+                    Signature = dto.Signature ?? string.Empty,
+                    Nonce = dto.Nonce
                 };
                 db.Transactions.Add(txn);
             }
@@ -739,7 +700,6 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
         return Results.StatusCode(500);
     }
 }).RequireAuthorization();
-
 
 // Transaction history
 app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbContext db, Encryption encryption) =>
@@ -774,11 +734,22 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
             timestamp = txn.Timestamp.ToString("o"),
             status = txn.Status,
             used = txn.IsSynced,
-            type = txn.Type
+            type = txn.Type,
+            nonce = txn.Nonce
         });
     }
     var encrypted = encryption.EncryptResponse(response);
     return Results.Ok(encrypted);
 }).RequireAuthorization();
 
-app.Run(); 
+app.Run();
+
+public record KeySyncDto
+{
+    [Required]
+    public int userId { get; init; }
+    [Required]
+    public string key { get; init; } = string.Empty;
+    [Required]
+    public long created { get; init; }
+}

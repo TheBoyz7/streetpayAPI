@@ -86,6 +86,37 @@ namespace Streetpay.API.Services
         }
 
         /// <summary>
+        /// Store a device-generated transaction key for a user.
+        /// </summary>
+        public void StoreTransactionKey(int userId, string key, DateTime created)
+        {
+            // Check for existing key to prevent duplicates
+            var existingKey = _dbContext.TransactionKeys
+                .Where(k => k.UserId == userId && k.Key == key)
+                .FirstOrDefault();
+
+            if (existingKey != null)
+            {
+                throw new InvalidOperationException("Key already exists for this user.");
+            }
+
+            // Store in database
+            var keyEntry = new TransactionKey
+            {
+                UserId = userId,
+                Key = key,
+                CreatedAt = created,
+                ExpiresAt = created.AddDays(7) // Match frontend 7-day expiration
+            };
+
+            _dbContext.TransactionKeys.Add(keyEntry);
+            _dbContext.SaveChanges();
+
+            // Cache in memory
+            _transactionKeys[userId] = key;
+        }
+
+        /// <summary>
         /// Get JWT secret key from configuration.
         /// </summary>
         public string GetJwtSecret()

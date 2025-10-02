@@ -3,74 +3,40 @@ using System.ComponentModel.DataAnnotations;
 
 namespace Streetpay.API.Models.DTOs
 {
-    /// <summary>
-    /// Data transfer object for offline transactions.
-    /// </summary>
     public class OfflineTransactionDto
     {
-        /// <summary>
-        /// Phone number of the sender.
-        /// </summary>
         [Required]
         [Phone]
         public string SenderPhone { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Phone number of the receiver.
-        /// </summary>
         [Required]
         [Phone]
         public string ReceiverPhone { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Transaction amount
-        /// </summary>
         [Required]
         [Range(0.01, 79228162514264337593543950335.0)]
         public decimal Amount { get; set; }
 
-        /// <summary>
-        /// Timestamp of the transaction.
-        /// </summary>
         [Required]
         public DateTime Timestamp { get; set; }
 
-        /// <summary>
-        /// Hashed transaction ID (SHA-256).
-        /// </summary>
         [Required]
         [MaxLength(64)]
         public string TransactionId { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Proposed sender's new balance (optional for validation).
-        /// </summary>
         public decimal? SenderNewBalance { get; set; }
 
-        /// <summary>
-        /// Proposed receiver's new balance (optional for validation).
-        /// </summary>
         public decimal? ReceiverNewBalance { get; set; }
 
-        /// <summary>
-        /// Currency of the transaction (e.g., NGN).
-        /// </summary>
         [Required]
         [MaxLength(3)]
         public string Currency { get; set; } = "NGN";
 
-        /// <summary>
-        /// Nonce for transaction uniqueness.
-        /// </summary>
         [Required]
         [MaxLength(64)]
         public string Nonce { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Signature of the transaction payload.
-        /// </summary>
-        [Required]
         [MaxLength(256)]
-        public string Signature { get; set; } = string.Empty;
+        public string? Signature { get; set; } = string.Empty;
     }
 }
