@@ -601,7 +601,7 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
     }
 }).RequireAuthorization();
 
-// transactions/sync endpoint 
+// transactions sync endpoint 
 app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption) =>
 {
     var validationResults = new List<ValidationResult>();
