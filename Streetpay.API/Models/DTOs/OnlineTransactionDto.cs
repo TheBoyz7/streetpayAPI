@@ -24,5 +24,8 @@ namespace Streetpay.API.Models.DTOs
 
         [MaxLength(256)]
         public string? Signature { get; set; } = string.Empty;
+
+        [Required]
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     }
 }

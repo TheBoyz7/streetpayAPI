@@ -423,7 +423,7 @@ app.MapPost("/keys/sync", async (KeySyncDto dto, StreetPayDbContext db, Encrypti
 }).RequireAuthorization();
 
 // Send money online
-app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
+app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
     try
     {
@@ -468,6 +468,36 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
             return Results.Conflict(new { Message = "Transaction or nonce already exists" });
         }
 
+        // START: ADDED VERIFICATION BLOCK
+        try
+        {
+            var secretKey = keyService.GetTransactionKey(sender.Id);
+            var transactionDetails = new
+            {
+                transactionId = dto.TransactionId,
+                timestamp = dto.Timestamp.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                senderPhone = sender.Phone,
+                receiverPhone = receiver.Phone
+            };
+
+            var message = System.Text.Json.JsonSerializer.Serialize(transactionDetails);
+            using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(secretKey));
+            var computedHash = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(message));
+            var serverSignature = Convert.ToBase64String(computedHash);
+
+            if (serverSignature != dto.Signature)
+            {
+                Console.WriteLine($"Signature mismatch for TransactionId={dto.TransactionId}");
+                return Results.Unauthorized(); // REJECT
+            }
+        }
+        catch (KeyNotFoundException)
+        {
+            Console.WriteLine($"Transaction key not found for SenderId={dto.SenderId}");
+            return Results.Unauthorized(); // REJECT
+        }
+        // END: ADDED VERIFICATION BLOCK
+
         using var transaction = await db.Database.BeginTransactionAsync();
         try
         {
@@ -487,7 +517,7 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
                 Currency = "NGN",
                 Status = "sent",
                 IsSynced = true,
-                Timestamp = DateTime.UtcNow,
+                Timestamp = dto.Timestamp, // use client-signed timestamp, not DateTime.UtcNow
                 Type = "online",
                 Used = true,
                 Signature = dto.Signature ?? string.Empty,
@@ -507,6 +537,7 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
                 senderNewBalance = txn.SenderNewBalance,
                 receiverNewBalance = txn.ReceiverNewBalance
             };
+
             Console.WriteLine($"Sending response payload: {System.Text.Json.JsonSerializer.Serialize(payload)}");
             var encrypted = encryption.EncryptResponse(payload);
             return Results.Ok(encrypted);
@@ -524,6 +555,7 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
         return Results.StatusCode(500);
     }
 }).RequireAuthorization();
+
 
 // Receive offline
 app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, StreetPayDbContext db, Encryption encryption) =>
@@ -602,11 +634,12 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
 }).RequireAuthorization();
 
 // transactions sync endpoint 
-app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption) =>
+app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
     var validationResults = new List<ValidationResult>();
     var results = new List<object>();
 
+    // Using a DB transaction ensures that all sync operations succeed or none do.
     using var transaction = await db.Database.BeginTransactionAsync();
     try
     {
@@ -639,28 +672,68 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                 continue;
             }
 
-            var existingTxn = await db.Transactions.FirstOrDefaultAsync(t => t.TransactionId == dto.TransactionId || t.Nonce == dto.Nonce);
+            // =================================================================
+            // FIX #1: SIGNATURE VERIFICATION
+            // This block is added to verify the HMAC signature of every transaction.
+            // =================================================================
+            try
+            {
+                var secretKey = keyService.GetTransactionKey(sender.Id);
+                var transactionDetails = new
+                {
+                    transactionId = dto.TransactionId,
+                    timestamp = dto.Timestamp.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                    senderPhone = dto.SenderPhone,
+                    receiverPhone = dto.ReceiverPhone
+                };
+                var message = System.Text.Json.JsonSerializer.Serialize(transactionDetails);
+                using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(secretKey));
+                var computedHash = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(message));
+                var serverSignature = Convert.ToBase64String(computedHash);
+
+                if (serverSignature != dto.Signature)
+                {
+                    results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid signature" });
+                    continue; // REJECT
+                }
+            }
+            catch (KeyNotFoundException)
+            {
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Sender's transaction key not found" });
+                continue; // REJECT
+            }
+            
+            var existingTxn = await db.Transactions.FirstOrDefaultAsync(t => t.TransactionId == dto.TransactionId && t.Nonce == dto.Nonce);
+
+            // Skip if this exact transaction is already synced
+            if (existingTxn != null && existingTxn.IsSynced)
+            {
+                results.Add(new { TransactionId = dto.TransactionId, Status = "Skipped", Message = "Transaction already synced" });
+                continue;
+            }
+
+            // =================================================================
+            // FIX #2: REFACTORED BALANCE AND DATABASE LOGIC
+            // This logic now correctly handles new vs. existing transactions
+            // and ensures balances are updated only once.
+            // =================================================================
+            
+            // This is the authoritative balance update. It happens ONLY after the signature is verified.
+            sender.MainBalance -= dto.Amount;
+            receiver.MainBalance += dto.Amount;
+
             if (existingTxn != null)
             {
-                if (existingTxn.IsSynced)
-                {
-                    results.Add(new { TransactionId = dto.TransactionId, Status = "Skipped", Message = "Transaction already synced" });
-                    continue;
-                }
+                // If transaction exists but wasn't synced, we update it
                 existingTxn.Status = "synced";
                 existingTxn.IsSynced = true;
-                existingTxn.SenderId = sender.Id;
-                existingTxn.ReceiverId = receiver.Id;
-                existingTxn.Type = "offline";
-                existingTxn.Used = true;
-                existingTxn.SenderNewBalance = sender.MainBalance - dto.Amount;
-                existingTxn.ReceiverNewBalance = receiver.MainBalance + dto.Amount;
-                existingTxn.Signature = dto.Signature ?? string.Empty;
-                existingTxn.Nonce = dto.Nonce;
+                existingTxn.SenderNewBalance = sender.MainBalance;
+                existingTxn.ReceiverNewBalance = receiver.MainBalance;
             }
             else
             {
-                var txn = new Transaction
+                // If transaction is new, we create it
+                var newTxn = new Transaction
                 {
                     TransactionId = dto.TransactionId,
                     SenderId = sender.Id,
@@ -668,8 +741,8 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                     SenderPhone = dto.SenderPhone,
                     ReceiverPhone = dto.ReceiverPhone,
                     Amount = dto.Amount,
-                    SenderNewBalance = sender.MainBalance - dto.Amount,
-                    ReceiverNewBalance = receiver.MainBalance + dto.Amount,
+                    SenderNewBalance = sender.MainBalance,
+                    ReceiverNewBalance = receiver.MainBalance,
                     Currency = dto.Currency,
                     Status = "synced",
                     IsSynced = true,
@@ -679,17 +752,23 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
                     Signature = dto.Signature ?? string.Empty,
                     Nonce = dto.Nonce
                 };
-                db.Transactions.Add(txn);
+                db.Transactions.Add(newTxn);
             }
 
-            sender.MainBalance -= dto.Amount;
-            receiver.MainBalance += dto.Amount;
-
-            results.Add(new { TransactionId = dto.TransactionId, Status = "Success", Message = "Transaction synced", SenderNewBalance = sender.MainBalance, ReceiverNewBalance = receiver.MainBalance });
+            results.Add(new {
+                TransactionId = dto.TransactionId,
+                Status = "Success",
+                Message = "Transaction synced",
+                SenderNewBalance = sender.MainBalance,
+                ReceiverNewBalance = receiver.MainBalance
+            });
         }
 
+        // Save all changes to the database at once
         await db.SaveChangesAsync();
+        // Commit the entire batch of operations
         await transaction.CommitAsync();
+
         var encrypted = encryption.EncryptResponse(results);
         return Results.Ok(new { Message = "Sync complete", Results = encrypted });
     }
