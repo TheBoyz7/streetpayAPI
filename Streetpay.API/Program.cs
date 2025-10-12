@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Options;
 using Streetpay.API;
 using Microsoft.EntityFrameworkCore;
 using Streetpay.API.Helpers;
@@ -89,7 +90,7 @@ app.UseAuthorization();
 app.MapGet("/", () => Results.Ok(new { Message = "StreetPay Offline API is live" }));
 
 // Register a new user 
-app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
+app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext db, KeyManagementService keyService, IOptions<EncryptionOptions> encryptionOptions) =>
 {
     var validationResults = new List<ValidationResult>();
     if (!Validator.TryValidateObject(req, new ValidationContext(req), validationResults, true))
@@ -113,22 +114,31 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
     {
         await db.SaveChangesAsync();
 
-        // Generate initial transaction key
+        // --- FIX: Added token generation to log user in immediately ---
+        var key = Encoding.ASCII.GetBytes(keyService.GetJwtSecret());
+        var tokenDescriptor = new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(new[] { new Claim("id", newUser.Id.ToString()) }),
+            Expires = DateTime.UtcNow.AddHours(1),
+            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+        };
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var token = tokenHandler.CreateToken(tokenDescriptor);
+        // --- End of Fix ---
+
         var transactionKey = keyService.GenerateTransactionKey(newUser.Id);
         var payload = new 
         {
-            newUser.Id,
-            newUser.Name,
-            newUser.Phone,
-            TransactionKey = transactionKey
+            id = newUser.Id,
+            name = newUser.Name,
+            phone = newUser.Phone,
+            token = tokenHandler.WriteToken(token), 
+            transactionKey = transactionKey,
+            encryptionKey = encryptionOptions.Value.AesKey 
         };
-        var encrypted = encryption.EncryptResponse(payload);
-        return Results.Created($"/auth/profile/{newUser.Id}", encrypted);
-    }
-    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
-    {
-        Console.WriteLine($"Database locked during user registration: {ex.Message}");
-        return Results.StatusCode(503);
+        
+        // Return the payload directly without encrypting it
+        return Results.Created($"/auth/profile/{newUser.Id}", payload);
     }
     catch (Exception ex)
     {
@@ -138,14 +148,8 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
 });
 
 // Login user 
-app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
+app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db, KeyManagementService keyService, IOptions<EncryptionOptions> encryptionOptions) =>
 {
-    var validationResults = new List<ValidationResult>();
-    if (!Validator.TryValidateObject(login, new ValidationContext(login), validationResults, true))
-    {
-        return Results.BadRequest(new { Message = "Invalid input", Errors = validationResults.Select(v => v.ErrorMessage) });
-    }
-
     var user = await db.Users.FirstOrDefaultAsync(u => u.Phone == login.Phone);
     if (user == null || !BCrypt.Net.BCrypt.Verify(login.Pin, user.Pin))
         return Results.Unauthorized();
@@ -160,7 +164,6 @@ app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db,
     var tokenHandler = new JwtSecurityTokenHandler();
     var token = tokenHandler.CreateToken(tokenDescriptor);
 
-    // Generate or retrieve transaction key
     var transactionKey = keyService.GenerateTransactionKey(user.Id);
     var payload = new
     {
@@ -168,12 +171,15 @@ app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db,
         name = user.Name,
         phone = user.Phone,
         token = tokenHandler.WriteToken(token),
-        transactionKey
+        transactionKey,
+        encryptionKey = encryptionOptions.Value.AesKey
     };
-    return Results.Ok(encryption.EncryptResponse(payload));
+    
+    // Return the payload directly without encrypting it
+    return Results.Ok(payload);
 });
 
-// Profile 
+//Profile
 app.MapGet("/auth/profile/{id}", async (int id, StreetPayDbContext db, Encryption encryption) =>
 {
     var user = await db.Users.FindAsync(id);
