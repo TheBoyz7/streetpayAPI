@@ -203,43 +203,53 @@ app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db, Encryption encr
     if (user == null)
         return Results.NotFound(new { Message = "User not found" });
 
-    var wallet = new WalletResponse
+    var wallet = new 
     {
         Main = user.MainBalance,
-        Savings = user.SavingsBalance
+        Savings = user.SavingsBalance,
+        Offline = user.OfflineBalance // <-- Add this line
     };
     var encrypted = encryption.EncryptResponse(wallet);
     return Results.Ok(encrypted);
 }).RequireAuthorization();
 
 // Update wallet balance 
-app.MapPut("/wallet/{id}", async (int id, WalletUpdateRequest wallet, StreetPayDbContext db) =>
+// ADD THIS NEW ENDPOINT
+app.MapPost("/wallet/to-offline", async (OfflineTopUpDto dto, StreetPayDbContext db, Encryption encryption, HttpContext context) =>
 {
-    var user = await db.Users.FindAsync(id);
-    if (user == null)
-        return Results.NotFound(new { Message = "User not found" });
-
-    var validationResults = new List<ValidationResult>();
-    if (!Validator.TryValidateObject(wallet, new ValidationContext(wallet), validationResults, true))
+    var userIdClaim = context.User.FindFirst("id")?.Value;
+    if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out var authUserId) || authUserId != dto.UserId)
     {
-        return Results.BadRequest(new { Message = "Invalid wallet data", Errors = validationResults.Select(v => v.ErrorMessage) });
+        return Results.Unauthorized();
     }
-
-    user.MainBalance = wallet.Main;
-    user.SavingsBalance = wallet.Savings;
+    
+    using var dbTransaction = await db.Database.BeginTransactionAsync();
     try
     {
+        var user = await db.Users.FindAsync(dto.UserId);
+        if (user == null) return Results.NotFound(new { Message = "User not found" });
+        if (user.MainBalance < dto.Amount) return Results.BadRequest(new { Message = "Insufficient main balance" });
+
+        user.MainBalance -= dto.Amount;
+        user.OfflineBalance += dto.Amount;
+
         await db.SaveChangesAsync();
-        return Results.Ok(new { Message = "Wallet updated", Main = user.MainBalance, Savings = user.SavingsBalance });
-    }
-    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
-    {
-        Console.WriteLine($"Database locked during wallet update: {ex.Message}");
-        return Results.StatusCode(503);
+        await dbTransaction.CommitAsync();
+
+        var payload = new 
+        {
+            success = true,
+            message = $"₦{dto.Amount} moved to Offline Wallet.",
+            main = user.MainBalance,
+            offline = user.OfflineBalance
+        };
+        var encrypted = encryption.EncryptResponse(payload);
+        return Results.Ok(encrypted);
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error updating wallet: {ex.Message}");
+        await dbTransaction.RollbackAsync();
+        Console.WriteLine($"Error during offline top-up: {ex.Message}");
         return Results.StatusCode(500);
     }
 }).RequireAuthorization();
@@ -642,148 +652,38 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
 // transactions sync endpoint 
 app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
-    var validationResults = new List<ValidationResult>();
     var results = new List<object>();
-
-    // Using a DB transaction ensures that all sync operations succeed or none do.
     using var transaction = await db.Database.BeginTransactionAsync();
     try
     {
         foreach (var dto in txns)
         {
-            if (!Validator.TryValidateObject(dto, new ValidationContext(dto), validationResults, true))
-            {
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid transaction data" });
-                continue;
-            }
-
             var sender = await db.Users.FirstOrDefaultAsync(u => u.Phone == dto.SenderPhone);
             var receiver = await db.Users.FirstOrDefaultAsync(u => u.Phone == dto.ReceiverPhone);
-
-            if (sender == null || receiver == null)
-            {
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Sender or receiver not found" });
-                continue;
-            }
-
-            if (dto.Amount <= 0)
-            {
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid amount" });
-                continue;
-            }
-
-            if (DateTime.UtcNow - dto.Timestamp > TimeSpan.FromDays(7))
-            {
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Transaction expired" });
-                continue;
-            }
-
-            // =================================================================
-            // FIX #1: SIGNATURE VERIFICATION
-            // This block is added to verify the HMAC signature of every transaction.
-            // =================================================================
+            if (sender == null || receiver == null) { results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Sender or receiver not found" }); continue; }
+            if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId && t.Nonce == dto.Nonce)) { results.Add(new { TransactionId = dto.TransactionId, Status = "Skipped", Message = "Transaction already synced." }); continue; }
+            if (sender.OfflineBalance < dto.Amount) { results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Insufficient offline balance." }); continue; }
             try
             {
                 var secretKey = keyService.GetTransactionKey(sender.Id);
-                var transactionDetails = new
-                {
-                    transactionId = dto.TransactionId,
-                    timestamp = dto.Timestamp.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                    senderPhone = dto.SenderPhone,
-                    receiverPhone = dto.ReceiverPhone
-                };
-                var message = System.Text.Json.JsonSerializer.Serialize(transactionDetails);
-                using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(secretKey));
-                var computedHash = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(message));
+                var canonicalString = $"{dto.TransactionId}{dto.Timestamp:yyyy-MM-ddTHH:mm:ss.fffZ}{dto.SenderPhone}{dto.ReceiverPhone}";
+                using var hmac = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(secretKey));
+                var computedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes(canonicalString));
                 var serverSignature = Convert.ToBase64String(computedHash);
-
-                if (serverSignature != dto.Signature)
-                {
-                    results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid signature" });
-                    continue; // REJECT
-                }
+                if (serverSignature != dto.Signature) { results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Invalid signature" }); continue; }
             }
-            catch (KeyNotFoundException)
-            {
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Sender's transaction key not found" });
-                continue; // REJECT
-            }
-            
-            var existingTxn = await db.Transactions.FirstOrDefaultAsync(t => t.TransactionId == dto.TransactionId && t.Nonce == dto.Nonce);
-
-            // Skip if this exact transaction is already synced
-            if (existingTxn != null && existingTxn.IsSynced)
-            {
-                results.Add(new { TransactionId = dto.TransactionId, Status = "Skipped", Message = "Transaction already synced" });
-                continue;
-            }
-
-            // =================================================================
-            // FIX #2: REFACTORED BALANCE AND DATABASE LOGIC
-            // This logic now correctly handles new vs. existing transactions
-            // and ensures balances are updated only once.
-            // =================================================================
-            
-            // This is the authoritative balance update. It happens ONLY after the signature is verified.
-            sender.MainBalance -= dto.Amount;
-            receiver.MainBalance += dto.Amount;
-
-            if (existingTxn != null)
-            {
-                // If transaction exists but wasn't synced, we update it
-                existingTxn.Status = "synced";
-                existingTxn.IsSynced = true;
-                existingTxn.SenderNewBalance = sender.MainBalance;
-                existingTxn.ReceiverNewBalance = receiver.MainBalance;
-            }
-            else
-            {
-                // If transaction is new, we create it
-                var newTxn = new Transaction
-                {
-                    TransactionId = dto.TransactionId,
-                    SenderId = sender.Id,
-                    ReceiverId = receiver.Id,
-                    SenderPhone = dto.SenderPhone,
-                    ReceiverPhone = dto.ReceiverPhone,
-                    Amount = dto.Amount,
-                    SenderNewBalance = sender.MainBalance,
-                    ReceiverNewBalance = receiver.MainBalance,
-                    Currency = dto.Currency,
-                    Status = "synced",
-                    IsSynced = true,
-                    Timestamp = dto.Timestamp,
-                    Type = "offline",
-                    Used = true,
-                    Signature = dto.Signature ?? string.Empty,
-                    Nonce = dto.Nonce
-                };
-                db.Transactions.Add(newTxn);
-            }
-
-            results.Add(new {
-                TransactionId = dto.TransactionId,
-                Status = "Success",
-                Message = "Transaction synced",
-                SenderNewBalance = sender.MainBalance,
-                ReceiverNewBalance = receiver.MainBalance
-            });
+            catch (KeyNotFoundException) { results.Add(new { TransactionId = dto.TransactionId, Status = "Failed", Message = "Sender's transaction key not found" }); continue; }
+            sender.OfflineBalance -= dto.Amount;
+            receiver.OfflineBalance += dto.Amount;
+            var newTxn = new Transaction { TransactionId = dto.TransactionId, SenderId = sender.Id, ReceiverId = receiver.Id, SenderPhone = dto.SenderPhone, ReceiverPhone = dto.ReceiverPhone, Amount = dto.Amount, SenderNewBalance = sender.MainBalance, ReceiverNewBalance = receiver.MainBalance, Currency = "NGN", Status = "synced", IsSynced = true, Timestamp = dto.Timestamp, Type = "offline", Used = true, Signature = dto.Signature ?? string.Empty, Nonce = dto.Nonce };
+            db.Transactions.Add(newTxn);
+            results.Add(new { TransactionId = dto.TransactionId, Status = "Success", Message = "Transaction synced" });
         }
-
-        // Save all changes to the database at once
         await db.SaveChangesAsync();
-        // Commit the entire batch of operations
         await transaction.CommitAsync();
-
-        var encrypted = encryption.EncryptResponse(results);
-        return Results.Ok(new { Message = "Sync complete", Results = encrypted });
+        return Results.Ok(encryption.EncryptResponse(new { success = true, results }));
     }
-    catch (Exception ex)
-    {
-        await transaction.RollbackAsync();
-        Console.WriteLine($"Error during sync: {ex.Message}");
-        return Results.StatusCode(500);
-    }
+    catch (Exception) { await transaction.RollbackAsync(); return Results.StatusCode(500); }
 }).RequireAuthorization();
 
 // Transaction history
@@ -829,6 +729,34 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
 
 app.Run();
 
+public class OfflineEscrow
+{
+    [Key]
+    public int Id { get; set; }
+    [Required]
+    public required string TransactionId { get; set; }
+    [Required]
+    public int SenderId { get; set; }
+    [Required]
+    public decimal Amount { get; set; }
+    [Required]
+    public string Status { get; set; } = "Active"; // Active, Settled, Expired
+    [Required]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    [Required]
+    public DateTime ExpiresAt { get; set; }
+}
+
+public record OfflineCommitDto
+{
+    [Required]
+    public int SenderId { get; init; }
+    [Required]
+    public required string TransactionId { get; init; }
+    [Required, Range(0.01, double.MaxValue)]
+    public decimal Amount { get; init; }
+}
+
 public record KeySyncDto
 {
     [Required]
@@ -837,4 +765,12 @@ public record KeySyncDto
     public string key { get; init; } = string.Empty;
     [Required]
     public long created { get; init; }
+}
+
+public record OfflineTopUpDto
+{
+    [Required]
+    public int UserId { get; init; }
+    [Required, Range(0.01, double.MaxValue)]
+    public decimal Amount { get; init; }
 }

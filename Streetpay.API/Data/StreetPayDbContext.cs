@@ -10,6 +10,7 @@ namespace Streetpay.API
         public DbSet<User> Users { get; set; }
         public DbSet<Transaction> Transactions { get; set; }
         public DbSet<TransactionKey> TransactionKeys { get; set; }
+        public DbSet<OfflineEscrow> OfflineEscrows { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {

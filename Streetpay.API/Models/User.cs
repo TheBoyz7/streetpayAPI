@@ -26,5 +26,10 @@ namespace Streetpay.API.Models
         [Required]
         [Column(TypeName = "DECIMAL(18,2)")]
         public decimal SavingsBalance { get; set; }
-    }
+
+        [Required]
+        [Column(TypeName = "DECIMAL(18,2)")]
+        public decimal OfflineBalance { get; set; } = 0;
+}
+    
 }

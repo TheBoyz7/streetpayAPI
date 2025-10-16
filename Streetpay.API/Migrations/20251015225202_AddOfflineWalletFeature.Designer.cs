@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Streetpay.API;
 
@@ -10,9 +11,11 @@ using Streetpay.API;
 namespace Streetpay.API.Migrations
 {
     [DbContext(typeof(StreetPayDbContext))]
-    partial class StreetPayDbContextModelSnapshot : ModelSnapshot
+    [Migration("20251015225202_AddOfflineWalletFeature")]
+    partial class AddOfflineWalletFeature
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.7");
