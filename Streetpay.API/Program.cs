@@ -589,7 +589,8 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
         if (await db.Transactions.AnyAsync(t => t.TransactionId == dto.TransactionId || t.Nonce == dto.Nonce))
             return Results.Conflict(new { Message = "Transaction or nonce already exists" });
 
-        // Signature verification
+        // Generate signature server-side
+        string signature;
         try
         {
             var secretKey = keyService.GetTransactionKey(sender.Id);
@@ -603,13 +604,11 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
             var message = System.Text.Json.JsonSerializer.Serialize(transactionDetails);
             using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(secretKey));
             var computedHash = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(message));
-            var serverSignature = Convert.ToBase64String(computedHash);
-
-            if (serverSignature != dto.Signature)
-                return Results.Unauthorized();
+            signature = Convert.ToBase64String(computedHash);
         }
         catch (KeyNotFoundException)
         {
+            Console.WriteLine($"Transaction key not found for sender ID: {sender.Id}");
             return Results.Unauthorized();
         }
 
@@ -635,7 +634,7 @@ app.MapPost("/transactions/send", async (OnlineTransactionDto dto, StreetPayDbCo
                 Timestamp = dto.Timestamp,
                 Type = "online",
                 Used = true,
-                Signature = dto.Signature ?? string.Empty,
+                Signature = signature, // Store server-generated signature
                 Nonce = dto.Nonce
             };
 
