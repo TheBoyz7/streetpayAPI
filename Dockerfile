@@ -1,34 +1,14 @@
-# ---- Base runtime ----
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
-WORKDIR /app
-EXPOSE 8080
-
-# ---- Build stage ----
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-ARG BUILD_CONFIGURATION=Release
-WORKDIR /src
-
-COPY ["Streetpay.API/Streetpay.API.csproj", "Streetpay.API/"]
-RUN dotnet restore "Streetpay.API/Streetpay.API.csproj"
-COPY . .
-WORKDIR "/src/Streetpay.API"
-RUN dotnet build "Streetpay.API.csproj" -c $BUILD_CONFIGURATION -o /app/build
-
-# ---- Publish stage ----
-FROM build AS publish
-RUN dotnet publish "Streetpay.API.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
-
 # ---- Final stage ----
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS final
 WORKDIR /app
 
-# Copy published output
+# Copy published app
 COPY --from=publish /app/publish .
 
-# Copy csproj so EF Core can find it
-COPY Streetpay.API/Streetpay.API.csproj /app/Streetpay.API/
+# Copy entire source (needed for EF migrations)
+COPY . /src
 
-# Copy migration script
+# Copy migrate script
 COPY migrate.sh /app/migrate.sh
 RUN chmod +x /app/migrate.sh
 
