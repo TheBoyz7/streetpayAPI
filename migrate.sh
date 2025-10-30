@@ -1,12 +1,12 @@
 #!/bin/bash
+set -e
 echo "Applying EF Core Migrations..."
 
-# Ensure csproj path points to where it actually exists
-dotnet ef database update --project /src/Streetpay.API/Streetpay.API.csproj --startup-project /app --verbose
-
-if [ $? -eq 0 ]; then
-  echo "✅ Database ready! Starting API..."
-else
-  echo "❌ Migration failed!" >&2
+# Ensure we run ef against the project source in /src (we copied repo to /src in migrate stage)
+# Use --no-build to avoid attempting to rebuild the project from the publish output
+dotnet ef database update --project /src/Streetpay.API/Streetpay.API.csproj --startup-project /src/Streetpay.API --no-build --verbose || {
+  echo "Migration failed or already applied (non-zero exit)."
   exit 1
-fi
+}
+
+echo "Migrations applied."
