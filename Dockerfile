@@ -1,4 +1,4 @@
-# ---- Base runtime (smaller) ----
+# ---- Base runtime ----
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 WORKDIR /app
 EXPOSE 8080
@@ -18,14 +18,21 @@ RUN dotnet build "Streetpay.API.csproj" -c $BUILD_CONFIGURATION -o /app/build
 FROM build AS publish
 RUN dotnet publish "Streetpay.API.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
 
-# ---- FINAL IMAGE (SDK for EF) ----
+# ---- Final stage ----
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS final
 WORKDIR /app
+
+# Copy published output
 COPY --from=publish /app/publish .
+
+# Copy csproj so EF Core can find it
+COPY Streetpay.API/Streetpay.API.csproj /app/Streetpay.API/
+
+# Copy migration script
 COPY migrate.sh /app/migrate.sh
 RUN chmod +x /app/migrate.sh
 
-# INSTALL EF TOOL
+# Install EF CLI
 RUN dotnet tool install --global dotnet-ef --version 8.0.10
 ENV PATH="$PATH:/root/.dotnet/tools"
 
