@@ -148,7 +148,7 @@ app.MapPost("/auth/register", async (UserRegisterRequest req, StreetPayDbContext
 });
 
 // =================================================================
-// STEP 2.1: Login with DeviceId Hold Logic
+// STEP 2.1: Login with Smart Hold Logic
 // =================================================================
 app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db, KeyManagementService keyService, IOptions<EncryptionOptions> encryptionOptions) =>
 {
@@ -171,10 +171,18 @@ app.MapPost("/auth/login", async (UserLoginRequest login, StreetPayDbContext db,
         // 2. Check if this is a new/fresh device
         if (!string.IsNullOrEmpty(user.LastKnownDeviceId) && user.LastKnownDeviceId != login.DeviceId)
         {
-            Console.WriteLine($"New device detected for user {user.Id}. Quarantining ₦{user.OfflineBalance}.");
-            user.HeldBalance += user.OfflineBalance;
-            user.OfflineBalance = 0;
-            user.HoldExpiresAt = DateTime.UtcNow.AddHours(72);
+            // LOGIC CHANGE: Only trigger hold if there is money to hold
+            if (user.OfflineBalance > 0)
+            {
+                Console.WriteLine($"New device detected for user {user.Id}. Quarantining ₦{user.OfflineBalance}.");
+                user.HeldBalance += user.OfflineBalance;
+                user.OfflineBalance = 0;
+                user.HoldExpiresAt = DateTime.UtcNow.AddHours(72);
+            }
+            else
+            {
+                Console.WriteLine($"New device detected for user {user.Id}, but offline balance is 0. No hold needed.");
+            }
         }
 
         // 3. Update the user's last known device
@@ -232,7 +240,7 @@ app.MapGet("/auth/profile/{id}", async (int id, StreetPayDbContext db, Encryptio
 }).RequireAuthorization();
 
 // =================================================================
-// STEP 2.2: Wallet with Hold Check
+// STEP 2.2: Wallet with Auto-Dissolve Hold Check
 // =================================================================
 app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db, Encryption encryption) =>
 {
@@ -245,6 +253,13 @@ app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db, Encryption encr
     {
         user.MainBalance += user.HeldBalance;
         user.HeldBalance = 0;
+        user.HoldExpiresAt = null;
+        await db.SaveChangesAsync();
+    }
+    
+    // LOGIC CHANGE: Self-healing. If held balance is 0, remove the timestamp.
+    if (user.HeldBalance == 0 && user.HoldExpiresAt.HasValue)
+    {
         user.HoldExpiresAt = null;
         await db.SaveChangesAsync();
     }
@@ -261,7 +276,7 @@ app.MapGet("/wallet/{id}", async (int id, StreetPayDbContext db, Encryption encr
 }).RequireAuthorization();
 
 // =================================================================
-// STEP 2.3: To Offline with Hold Logic
+// STEP 2.3: To Offline
 // =================================================================
 app.MapPost("/wallet/to-offline", async (OfflineTopUpDto dto, StreetPayDbContext db, Encryption encryption, HttpContext context) =>
 {
@@ -383,7 +398,7 @@ app.MapPost("/wallet/from-savings", async (WalletTransferDto dto, StreetPayDbCon
 }).RequireAuthorization();
 
 // =================================================================
-// STEP 2.4: Offline to Main - BLOCK IF HOLD ACTIVE
+// STEP 2.4: Offline to Main - BLOCK ONLY IF VALID HOLD
 // =================================================================
 app.MapPost("/wallet/offline-to-main", async (WalletTransferDto dto, StreetPayDbContext db, Encryption encryption, HttpContext context) =>
 {
@@ -397,6 +412,13 @@ app.MapPost("/wallet/offline-to-main", async (WalletTransferDto dto, StreetPayDb
         var user = await db.Users.FindAsync(dto.UserId);
         if (user == null) return Results.NotFound(new { Message = "User not found" });
 
+        // LOGIC CHANGE: If HeldBalance is 0, clear any lingering hold date.
+        if (user.HeldBalance == 0)
+        {
+            user.HoldExpiresAt = null;
+        }
+
+        // Now check if a REAL hold exists
         if (user.HoldExpiresAt.HasValue && user.HoldExpiresAt.Value > DateTime.UtcNow)
             return Results.BadRequest(new { Message = "Cannot move funds from Offline Wallet while a hold is active." });
 
@@ -746,7 +768,7 @@ app.MapPost("/transactions/receive-offline", async (OfflineTransactionDto dto, S
 }).RequireAuthorization();
 
 // =================================================================
-// STEP 2.5: Sync with HeldBalance Logic
+// STEP 2.5: Sync with HeldBalance Clearing Logic
 // =================================================================
 app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, StreetPayDbContext db, Encryption encryption, KeyManagementService keyService) =>
 {
@@ -777,6 +799,12 @@ app.MapPost("/transactions/sync", async (List<OfflineTransactionDto> txns, Stree
             {
                 sender.HeldBalance -= dto.Amount;
                 fundedFromHold = true;
+                
+                // LOGIC CHANGE: If held balance drops to 0, clear the time lock immediately.
+                if (sender.HeldBalance == 0)
+                {
+                    sender.HoldExpiresAt = null;
+                }
             }
             else
             {
@@ -878,58 +906,32 @@ app.MapGet("/transactions/history/{userId}", async (int userId, StreetPayDbConte
 app.Run();
 
 public class OfflineEscrow
-
 {
-
     [Key]
-
     public int Id { get; set; }
-
     [Required]
-
     public required string TransactionId { get; set; }
-
     [Required]
-
     public int SenderId { get; set; }
-
     [Required]
-
     public decimal Amount { get; set; }
-
     [Required]
-
     public string Status { get; set; } = "Active"; // Active, Settled, Expired
-
     [Required]
-
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-
     [Required]
-
     public DateTime ExpiresAt { get; set; }
-
 }
 
 public record OfflineCommitDto
-
 {
-
     [Required]
-
     public int SenderId { get; init; }
-
     [Required]
-
     public required string TransactionId { get; init; }
-
     [Required, Range(0.01, double.MaxValue)]
-
     public decimal Amount { get; init; }
-
 }
-
-
 
 public record UserRegisterRequest
 {

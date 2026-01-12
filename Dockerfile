@@ -28,19 +28,14 @@ WORKDIR /app
 # Copy published output
 COPY --from=publish /app/publish .
 
-# ✅ Copy RSA key files so the cryptography service can find them
+# Copy RSA key files so the cryptography service can find them
 COPY Streetpay.API/Keys /app/Keys
 
-# ✅ Copy your database explicitly (optional for SQLite)
+# Copy your database explicitly (optional for SQLite)
 COPY Streetpay.API/streetpay.db ./streetpay.db
 
 # Set safe permissions
 RUN chmod -R 755 /app/Keys && chmod 777 streetpay.db || true
-
-# Optional: auto-apply migrations on startup (best for Render)
-# COPY migrate.sh /app/migrate.sh
-# RUN chmod +x /app/migrate.sh
-# ENTRYPOINT ["/bin/bash", "-c", "./migrate.sh && dotnet Streetpay.API.dll"]
 
 # ---- Start app ----
 ENTRYPOINT ["dotnet", "Streetpay.API.dll"]
